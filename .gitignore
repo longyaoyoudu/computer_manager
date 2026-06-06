@@ -1,0 +1,21 @@
+# 运行期生成、日志、报告
+logs/
+reports/
+
+# 用户本地配置（含 api_key，绝不提交）
+config.json
+config.json.bak.*
+
+# 备份文件
+*.bak
+*.tmp
+*.log
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# IDE / 编辑器（即便将来引入）
+.vscode/
+.idea/
+*.swp
