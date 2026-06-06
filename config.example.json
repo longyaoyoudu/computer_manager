@@ -1,0 +1,27 @@
+{
+  "llm": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "REPLACE_WITH_YOUR_KEY",
+    "model": "gpt-4o-mini",
+    "temperature": 0.2,
+    "timeout_seconds": 60,
+    "max_response_tokens": 2000
+  },
+  "ui": {
+    "language": "zh-CN",
+    "color": true,
+    "confirm_default": false
+  },
+  "behavior": {
+    "snapshot_mode": "quick",
+    "max_event_log_lines": 5,
+    "max_command_length": 2000,
+    "log_retention_days": 30,
+    "report_retention_days": 90
+  },
+  "safety": {
+    "allow_encoded_commands": false,
+    "allow_iex": false,
+    "allowed_base_urls": []
+  }
+}
