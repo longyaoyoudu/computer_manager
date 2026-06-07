@@ -23,6 +23,82 @@ $Script:CMLogger = $null
 #endregion
 
 #region Config
+function New-CMConfigTemplate {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $template = @'
+{
+  "llm": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "REPLACE_WITH_YOUR_KEY",
+    "model": "gpt-4o-mini",
+    "temperature": 0.2,
+    "timeout_seconds": 60,
+    "max_response_tokens": 2000
+  },
+  "ui": {
+    "language": "zh-CN",
+    "color": true,
+    "confirm_default": false
+  },
+  "behavior": {
+    "snapshot_mode": "quick",
+    "max_event_log_lines": 5,
+    "max_command_length": 2000,
+    "log_retention_days": 30,
+    "report_retention_days": 90
+  },
+  "safety": {
+    "allow_encoded_commands": false,
+    "allow_iex": false,
+    "allowed_base_urls": []
+  }
+}
+'@
+    $path = Join-Path $RootPath "config.json"
+    $template | Set-Content -Path $path -Encoding UTF8
+    return $path
+}
+
+function Get-CMConfig {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $path = Join-Path $RootPath "config.json"
+    if (-not (Test-Path $path)) {
+        return $null
+    }
+    try {
+        $json = Get-Content -Path $path -Raw -Encoding UTF8
+        $obj = $json | ConvertFrom-Json
+        # 转 hashtable（PS 5.1 没有 -AsHashtable，手动转一层）
+        return ConvertTo-Hashtable -InputObject $obj
+    } catch {
+        throw "config.json 解析失败：$($_.Exception.Message)"
+    }
+}
+
+function ConvertTo-Hashtable {
+    param($InputObject)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [System.Collections.IDictionary]) { return $InputObject }
+    $h = @{}
+    foreach ($p in $InputObject.PSObject.Properties) {
+        $v = $p.Value
+        if ($v -is [PSCustomObject]) { $v = ConvertTo-Hashtable -InputObject $v }
+        elseif ($v -is [System.Collections.IEnumerable] -and -not ($v -is [string])) {
+            $arr = @()
+            foreach ($item in $v) {
+                if ($item -is [PSCustomObject]) { $arr += ConvertTo-Hashtable -InputObject $item }
+                else { $arr += $item }
+            }
+            $v = $arr
+        }
+        $h[$p.Name] = $v
+    }
+    return $h
+}
 #endregion
 
 #region Logging
@@ -92,4 +168,5 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 }
 #endregion
+
 
