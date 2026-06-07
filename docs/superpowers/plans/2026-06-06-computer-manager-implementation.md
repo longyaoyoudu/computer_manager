@@ -8,6 +8,18 @@
 
 **Tech Stack:** PowerShell 5.1（默认 Win10/11 内置），Pester 3.4（仅开发期），OpenAI 兼容 LLM API（DeepSeek/Qwen/OpenAI/Ollama 等），`Invoke-RestMethod` 做 HTTP，CIM/WMI/Registry 做系统检测。
 
+**⚠️ 编码约定（重要）：所有 `.ps1` 文件必须以 **UTF-8 with BOM** 保存。**
+- PowerShell 5.1 在中文/日文等非英文 locale 上，对无 BOM 的 UTF-8 文件会按系统 ANSI 编码（GBK/CP932 等）解析，导致中文报错"字符串字面量缺少终止符"
+- `Write` 工具默认输出 UTF-8 **无 BOM**，所以每个 .ps1 创建后**必须**用 PowerShell 重编码为 UTF-8 with BOM
+- 推荐方式（创建 .ps1 后立即执行）：
+  ```powershell
+  $content = Get-Content $file -Raw -Encoding Default
+  $content | Out-File $file -Encoding UTF8
+  ```
+  （PS 5.1 的 `Out-File -Encoding UTF8` 会写入 BOM）
+- 此约定适用于 `computer_manager.ps1` 与所有 `tests/*.Tests.ps1`
+- Task 2 中已发现并修复此问题；后续任务一律按此处理
+
 ---
 
 ## 文件结构
