@@ -1,8 +1,8 @@
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+ï»¿$here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sut = (Resolve-Path "$here\..\computer_manager.ps1").Path
 
-Describe "computer_manager.ps1 dot-source ĞĞÎª" {
-    It "Ó¦¸ÃÄÜ dot-source ¼ÓÔØ¶ø²»½øÈëÖ÷²Ëµ¥" {
+Describe "computer_manager.ps1 dot-source è¡Œä¸º" {
+    It "åº”è¯¥èƒ½ dot-source åŠ è½½è€Œä¸è¿›å…¥ä¸»èœå•" {
         $output = & {
             . $sut
             "loaded"
@@ -10,8 +10,9 @@ Describe "computer_manager.ps1 dot-source ĞĞÎª" {
         ($output -join "`n") | Should Match "loaded"
     }
 
-    It "±©Â¶ $Script:CMVersion È«¾Ö±äÁ¿" {
+    It "æš´éœ² $Script:CMVersion å…¨å±€å˜é‡" {
         . $sut
         $Script:CMVersion | Should Be '1.0.0'
     }
 }
+
