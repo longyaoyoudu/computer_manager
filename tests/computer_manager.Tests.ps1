@@ -7,7 +7,10 @@ Describe "computer_manager.ps1 dot-source 行为" {
             . $sut
             "loaded"
         } 2>&1
-        ($output -join "`n") | Should Match "loaded"
+        $joined = ($output -join "`n")
+        $joined | Should Match "loaded"
+        $joined | Should Not Match "功能开发中"
+        $joined | Should Not Match "电脑管理工具"
     }
 
     It "暴露 $Script:CMVersion 全局变量" {
