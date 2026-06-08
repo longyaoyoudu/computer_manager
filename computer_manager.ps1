@@ -102,6 +102,58 @@ function ConvertTo-Hashtable {
 #endregion
 
 #region Logging
+function New-CMLogger {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RootPath)
+
+    $logsDir = Join-Path $RootPath "logs"
+    if (-not (Test-Path $logsDir)) {
+        New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+    }
+    $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $logFile = Join-Path $logsDir "$timestamp.log"
+
+    $logger = [PSCustomObject]@{
+        RootPath = $RootPath
+        LogsDir  = $logsDir
+        LogFile  = $logFile
+    }
+    return $logger
+}
+
+function Format-CMLogMessage {
+    param([string]$Level, [string]$Source, [string]$Message)
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $sanitized = Protect-CMLogSecret -Message $Message
+    return "[$ts] [$Level] [$Source] $sanitized"
+}
+
+function Protect-CMLogSecret {
+    param([string]$Message)
+    # 简单脱敏：sk-... / Bearer xxx / api_key=xxx / token=xxx
+    $patterns = @(
+        'sk-[A-Za-z0-9_-]{8,}',
+        'Bearer\s+[A-Za-z0-9._-]+',
+        '(?i)(api[_-]?key|token)\s*[:=]\s*["'']?[^"''\s,}]+',
+        '(?i)(password|secret)\s*[:=]\s*["'']?[^"''\s,}]+'
+    )
+    foreach ($p in $patterns) {
+        $Message = [Regex]::Replace($Message, $p, '***')
+    }
+    return $Message
+}
+
+function Write-CMLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$Logger,
+        [Parameter(Mandatory)][ValidateSet('INFO','WARN','ERR','USER','CMD','OUT')][string]$Level,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Message
+    )
+    $line = Format-CMLogMessage -Level $Level -Source $Source -Message $Message
+    Add-Content -Path $Logger.LogFile -Value $line -Encoding UTF8
+}
 #endregion
 
 #region UI Helpers
@@ -168,5 +220,6 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 }
 #endregion
+
 
 
