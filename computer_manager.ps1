@@ -152,7 +152,9 @@ function Write-CMLog {
         [Parameter(Mandatory)][string]$Message
     )
     $line = Format-CMLogMessage -Level $Level -Source $Source -Message $Message
-    Add-Content -Path $Logger.LogFile -Value $line -Encoding UTF8
+    # 使用 UTF8Encoding($false) 避免 Add-Content 在每行前追加 BOM（PS 5.1 行为）
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::AppendAllText($Logger.LogFile, "$line`n", $utf8NoBom)
 }
 #endregion
 
