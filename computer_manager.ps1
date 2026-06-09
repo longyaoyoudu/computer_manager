@@ -159,6 +159,59 @@ function Write-CMLog {
 #endregion
 
 #region UI Helpers
+function Write-CMSuccess { param([string]$Message) Write-Host $Message -ForegroundColor Green }
+function Write-CMWarn    { param([string]$Message) Write-Host $Message -ForegroundColor Yellow }
+function Write-CMError   { param([string]$Message) Write-Host $Message -ForegroundColor Red }
+function Write-CMInfo    { param([string]$Message) Write-Host $Message -ForegroundColor Cyan }
+function Write-CMStep    { param([string]$Message) Write-Host $Message -ForegroundColor Magenta }
+
+function Read-CMConfirm {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [bool]$DefaultYes = $false,
+        [string]$SimulateInput
+    )
+    if ($PSBoundParameters.ContainsKey('SimulateInput')) {
+        $input = $SimulateInput
+    } else {
+        $hint = if ($DefaultYes) { "[Y/n]" } else { "[y/N]" }
+        $input = (Read-Host "$Prompt $hint").Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($input)) { return $DefaultYes }
+    return ($input -match '^(y|yes)$')
+}
+
+function Format-CMBytes {
+    param([Parameter(Mandatory)][long]$Bytes)
+    if     ($Bytes -lt 1024)            { return "$Bytes B" }
+    elseif ($Bytes -lt 1024 * 1024)     { return ("{0:N2} KB" -f ($Bytes / 1024.0)) }
+    elseif ($Bytes -lt 1024 * 1024*1024){ return ("{0:N2} MB" -f ($Bytes / 1024.0 / 1024.0)) }
+    else                                { return ("{0:N2} GB" -f ($Bytes / 1024.0 / 1024.0 / 1024.0)) }
+}
+
+function Read-CMMenuChoice {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][int[]]$ValidChoices,
+        [string]$SimulateInput
+    )
+    while ($true) {
+        if ($PSBoundParameters.ContainsKey('SimulateInput')) {
+            $input = $SimulateInput
+        } else {
+            $input = (Read-Host $Prompt).Trim()
+        }
+        $n = 0
+        if ([int]::TryParse($input, [ref]$n) -and $ValidChoices -contains $n) {
+            return $n
+        }
+        if (-not $PSBoundParameters.ContainsKey('SimulateInput')) {
+            Write-CMWarn "无效输入，请输入: $($ValidChoices -join ', ')"
+        }
+    }
+}
 #endregion
 
 #region System Context
@@ -222,6 +275,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 }
 #endregion
+
 
 
 
