@@ -27,3 +27,10 @@ Describe "Format-CMBytes" {
     It "MB 单位" { Format-CMBytes -Bytes 5242880   | Should Be "5.00 MB" }
     It "GB 单位" { Format-CMBytes -Bytes 1073741824| Should Be "1.00 GB" }
 }
+
+Describe "Read-CMMenuChoice" {
+    It "返回有效选择" {
+        $result = Read-CMMenuChoice -Prompt "?" -ValidChoices @(1,2,3) -SimulateInput "2"
+        $result | Should Be 2
+    }
+}
