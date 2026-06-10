@@ -215,6 +215,39 @@ function Read-CMMenuChoice {
 #endregion
 
 #region System Context
+function Get-CMSystemContext {
+    [CmdletBinding()]
+    param()
+    $ctx = [PSCustomObject]@{}
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os) {
+        $ctx | Add-Member -NotePropertyName OsCaption -NotePropertyValue $os.Caption
+        $ctx | Add-Member -NotePropertyName OsVersion -NotePropertyValue $os.Version
+        $ctx | Add-Member -NotePropertyName OsBuild -NotePropertyValue $os.BuildNumber
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $ctx | Add-Member -NotePropertyName IsAdmin -NotePropertyValue $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $ctx | Add-Member -NotePropertyName UserName -NotePropertyValue $identity.Name
+    $ctx | Add-Member -NotePropertyName ComputerName -NotePropertyValue $env:COMPUTERNAME
+    return $ctx
+}
+
+function Initialize-CM {
+    [CmdletBinding()]
+    param()
+    $Script:CMConfig = Get-CMConfig -RootPath $Script:CMRoot
+    if (-not $Script:CMConfig) {
+        Write-CMWarn "未找到 config.json，正在生成模板..."
+        $path = New-CMConfigTemplate -RootPath $Script:CMRoot
+        Write-CMWarn "已生成：$path"
+        Write-CMWarn "请填入 api_key 后重新运行。"
+        return $false
+    }
+    $Script:CMLogger = New-CMLogger -RootPath $Script:CMRoot
+    Write-CMLog -Logger $Script:CMLogger -Level "INFO" -Source "INIT" -Message "computer_manager.ps1 启动，版本 $Script:CMVersion"
+    return $true
+}
 #endregion
 
 #region Snapshot
@@ -230,15 +263,25 @@ function Read-CMMenuChoice {
 #endregion
 
 #region Diagnose
+function Invoke-CMDiagnose {
+    Write-CMWarn "诊断模块开发中（任务 14-19）"
+}
 #endregion
 
 #region Cleanup
+function Invoke-CMCleanup {
+    Write-CMWarn "清理模块开发中（任务 9）"
+}
 #endregion
 
 #region Software
+function Get-CMInstalledSoftware { Write-CMWarn "列出软件：开发中" }
+function Invoke-CMUninstallSoftware { Write-CMWarn "卸载：开发中" }
+function Invoke-CMRepairStoreApps { Write-CMWarn "Store 修复：开发中" }
 #endregion
 
 #region Health
+function Invoke-CMHealthSnapshot { Write-CMWarn "健康快照：开发中" }
 #endregion
 
 #region Report
@@ -251,6 +294,9 @@ function Show-CMMainMenu {
     Write-Host "1. 诊断应用安装问题"
     Write-Host "2. 日常清理维护"
     Write-Host "3. 软件管理"
+    Write-Host "   3.1 列出已装软件"
+    Write-Host "   3.2 卸载软件"
+    Write-Host "   3.3 修复 Microsoft Store / 系统应用"
     Write-Host "4. 系统健康快照"
     Write-Host "5. 查看历史报告"
     Write-Host "6. 设置"
@@ -259,23 +305,102 @@ function Show-CMMainMenu {
     Write-Host ""
 }
 
-function Invoke-CMMain {
-    Show-CMMainMenu
-    Write-Host "（功能开发中 — 任务 6 将接入分发）" -ForegroundColor Yellow
+function Start-CMMainLoop {
+    while ($true) {
+        Show-CMMainMenu
+        $choice = Read-CMMenuChoice -Prompt "请选择" -ValidChoices @(0,1,2,3,4,5,6,7)
+        Write-CMLog -Logger $Script:CMLogger -Level "USER" -Source "MENU" -Message "选择 $choice"
+        switch ($choice) {
+            1 { Invoke-CMDiagnose }
+            2 { Invoke-CMCleanup }
+            3 { Show-CMSoftwareMenu }
+            4 { Invoke-CMHealthSnapshot }
+            5 { Show-CMHistory }
+            6 { Show-CMSettingsMenu }
+            7 { Show-CMAbout }
+            0 { Write-Host "再见。" -ForegroundColor Green; return }
+        }
+    }
+}
+
+function Show-CMSoftwareMenu {
+    while ($true) {
+        Write-Host ""
+        Write-Host "--- 软件管理 ---" -ForegroundColor Cyan
+        Write-Host "1. 列出已装软件"
+        Write-Host "2. 卸载软件"
+        Write-Host "3. 修复 Microsoft Store / 系统应用"
+        Write-Host "0. 返回主菜单"
+        $c = Read-CMMenuChoice -Prompt "选择" -ValidChoices @(0,1,2,3)
+        switch ($c) {
+            1 { Get-CMInstalledSoftware | Out-Host }
+            2 { Invoke-CMUninstallSoftware }
+            3 { Invoke-CMRepairStoreApps }
+            0 { return }
+        }
+    }
+}
+
+function Show-CMSettingsMenu {
+    while ($true) {
+        Write-Host ""
+        Write-Host "--- 设置 ---" -ForegroundColor Cyan
+        Write-Host "1. 重新生成 config.json 模板（覆盖现有）"
+        Write-Host "0. 返回主菜单"
+        $c = Read-CMMenuChoice -Prompt "选择" -ValidChoices @(0,1)
+        switch ($c) {
+            1 {
+                if (Read-CMConfirm -Prompt "将覆盖 config.json，确定？") {
+                    New-CMConfigTemplate -RootPath $Script:CMRoot | Out-Null
+                    Write-CMSuccess "已重新生成，请重新填入 api_key。"
+                }
+            }
+            0 { return }
+        }
+    }
+}
+
+function Show-CMHistory {
+    Write-Host ""
+    Write-Host "--- 历史报告（最近 10 条）---" -ForegroundColor Cyan
+    $reportDir = Join-Path $Script:CMRoot "reports"
+    if (-not (Test-Path $reportDir)) {
+        Write-CMWarn "还没有报告。"
+        return
+    }
+    Get-ChildItem $reportDir -Filter "*.md" | Sort-Object LastWriteTime -Descending | Select -First 10 | ForEach-Object {
+        Write-Host ("  {0:yyyy-MM-dd HH:mm}  {1}" -f $_.LastWriteTime, $_.Name)
+    }
+    Write-Host ""
+    Write-Host "（完整功能在任务 19）" -ForegroundColor Yellow
+}
+
+function Show-CMAbout {
+    Write-Host ""
+    Write-Host "电脑管理工具 v$Script:CMVersion" -ForegroundColor Cyan
+    Write-Host "项目地址：https://github.com/longyaoyoudu/computer_manager"
+    Write-Host "详细文档：docs/superpowers/specs/2026-06-06-computer-manager-design.md"
+    Write-Host ""
 }
 #endregion
 
 #region Main
+function Invoke-CMMain {
+    if (-not (Initialize-CM)) { return }
+    $ctx = Get-CMSystemContext
+    Write-CMInfo "用户: $($ctx.UserName) | 管理员: $($ctx.IsAdmin) | 系统: $($ctx.OsCaption) ($($ctx.OsBuild))"
+    Start-CMMainLoop
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         Invoke-CMMain
     } catch {
-        Write-Host "未捕获错误：$_" -ForegroundColor Red
+        Write-CMError "未捕获错误：$_"
+        if ($Script:CMLogger) {
+            Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "FATAL" -Message $_.ToString()
+        }
         exit 1
     }
 }
 #endregion
-
-
-
-
