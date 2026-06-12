@@ -289,9 +289,10 @@ function Get-CMSnapshot {
     # .NET
     $dotnetPaths = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -ErrorAction SilentlyContinue
     if ($dotnetPaths) {
-        $v = $null
-        if ($dotnetPaths -is [array]) { $v = $dotnetPaths[0].GetValue("Version", $null) } else { $v = $dotnetPaths.GetValue("Version", $null) }
-        $snap["dotnet_version"] = if ($v) { $v } else { "未知" }
+        $versions = @($dotnetPaths | ForEach-Object { $_.GetValue("Version", $null) } | Where-Object { $_ })
+        $snap["dotnet_version"] = if ($versions.Count -gt 0) {
+            ($versions | Sort-Object { [Version]$_ } -Descending | Select-Object -First 1)
+        } else { "未知" }
     } else {
         $snap["dotnet_version"] = "无"
     }
@@ -329,7 +330,7 @@ function Get-CMSnapshot {
     $events = Get-WinEvent -FilterHashtable @{LogName='Application','System'; Level=2} -MaxEvents $maxEvents -ErrorAction SilentlyContinue
     $snap["event_log_errors"] = @($events | ForEach-Object {
         $msg = $_.Message
-        if ($msg.Length -gt 500) { $msg = $msg.Substring(0, 500) + "..." }
+        if ($msg -and $msg.Length -gt 500) { $msg = $msg.Substring(0, 500) + "..." }
         [PSCustomObject]@{
             time    = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
             log     = $_.LogName
@@ -346,7 +347,7 @@ function Get-CMSnapshot {
         } catch { $snap["firewall"] = "Unknown" }
 
         # Auto-start services stopped
-        $autoStopped = Get-Service | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } | Select-Object -First 20 Name,Status
+        $autoStopped = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } | Select-Object -First 20 Name,Status
         $snap["auto_services_stopped"] = ($autoStopped | ConvertTo-Json -Compress)
     }
 
