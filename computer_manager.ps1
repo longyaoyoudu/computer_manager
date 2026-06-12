@@ -401,7 +401,102 @@ function Invoke-CMRepairStoreApps { Write-CMWarn "Store 修复：开发中" }
 #endregion
 
 #region Health
-function Invoke-CMHealthSnapshot { Write-CMWarn "健康快照：开发中" }
+function Get-CMHealthReport {
+    [CmdletBinding()]
+    param()
+    $r = [ordered]@{}
+
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os) {
+        $lastBoot = $os.LastBootUpTime
+        $uptimeDays = [math]::Round(((Get-Date) - $lastBoot).TotalDays, 1)
+        $r["os"] = "$($os.Caption) build $($os.BuildNumber) (启动 $uptimeDays 天)"
+    }
+
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+    $mem = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($mem) {
+        $totalGB = [math]::Round($mem.TotalVisibleMemorySize / 1MB, 1)
+        $freeGB  = [math]::Round($mem.FreePhysicalMemory / 1MB, 1)
+        $r["memory"] = [PSCustomObject]@{ total_gb = $totalGB; free_gb = $freeGB }
+    }
+
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    $r["cpu"] = if ($cpu) { $cpu.Name } else { "Unknown" }
+
+    $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue
+    $r["disk"] = @($disks | ForEach-Object {
+        [PSCustomObject]@{
+            drive      = $_.DeviceID
+            free_gb    = [math]::Round($_.FreeSpace / 1GB, 1)
+            size_gb    = [math]::Round($_.Size / 1GB, 1)
+            percent_free = [math]::Round(($_.FreeSpace / $_.Size) * 100, 1)
+        }
+    })
+
+    $r["auto_services_stopped"] = @(Get-Service |
+        Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } |
+        Select-Object -ExpandProperty Name -First 20)
+
+    $r["recent_event_errors"] = @(Get-WinEvent -FilterHashtable @{LogName='Application','System'; Level=2} -MaxEvents 10 -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            [PSCustomObject]@{
+                time = $_.TimeCreated.ToString("HH:mm:ss")
+                log  = $_.LogName
+                id   = $_.Id
+            }
+        })
+
+    $r["startup_items"] = @(Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue |
+        Select-Object -First 20 Name, Command, Location)
+
+    return [PSCustomObject]$r
+}
+
+function Format-CMHealthMarkdown {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Report)
+    $lines = @("# 系统健康快照", "", "生成时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", "")
+    foreach ($p in $Report.PSObject.Properties) {
+        $lines += "## $($p.Name)"
+        $val = $p.Value
+        if ($val -is [System.Collections.IEnumerable] -and -not ($val -is [string])) {
+            if ($val.Count -eq 0) {
+                $lines += "（无）"
+            } elseif (-not ($val[0] -is [string]) -and -not ($val[0] -is [hashtable]) -and -not ($val[0] -is [valuetype])) {
+                $lines += "| " + (($val[0].PSObject.Properties.Name) -join " | ") + " |"
+                $lines += "|" + ((@($val[0].PSObject.Properties.Name) | ForEach-Object { "---" }) -join "|") + "|"
+                foreach ($item in $val) {
+                    $cells = @($item.PSObject.Properties | ForEach-Object {
+                        $s = if ($null -eq $_.Value) { "" } else { "$($_.Value)" }
+                        if ($s.Length -gt 80) { $s.Substring(0, 80) + "..." }
+                        $s
+                    })
+                    $lines += "| " + ($cells -join " | ") + " |"
+                }
+            } else {
+                $lines += "``$val``".Replace('`$val', ($val | Out-String).Trim())
+            }
+        } else {
+            $lines += "``$val``".Replace('`$val', ($val | Out-String).Trim())
+        }
+        $lines += ""
+    }
+    return ($lines -join "`n")
+}
+
+function Invoke-CMHealthSnapshot {
+    Write-CMInfo "收集健康快照..."
+    $r = Get-CMHealthReport
+    $md = Format-CMHealthMarkdown -Report $r
+    $reportDir = Join-Path $Script:CMRoot "reports"
+    if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
+    $file = Join-Path $reportDir ("health_" + (Get-Date -Format "yyyy-MM-dd_HHmmss") + ".md")
+    $md | Set-Content -Path $file -Encoding UTF8
+    Write-CMSuccess "已保存：$file"
+    Write-Host ""
+    Write-Host $md
+}
 #endregion
 
 #region Report
