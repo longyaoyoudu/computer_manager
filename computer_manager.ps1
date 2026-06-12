@@ -251,6 +251,125 @@ function Initialize-CM {
 #endregion
 
 #region Snapshot
+function Get-CMSnapshot {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('quick','full')][string]$Mode = "quick"
+    )
+    $snap = [ordered]@{}
+
+    # OS
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os) {
+        $snap["os"] = "$($os.Caption) ($($os.Version), build $($os.BuildNumber))"
+        $sysDrive = $os.SystemDrive
+        if ($os.PSObject.Properties.Name -contains 'FreeSpace') {
+            $free = [math]::Round($os.FreeSpace / 1GB, 2)
+        } else {
+            $ld = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$($sysDrive)'" -ErrorAction SilentlyContinue
+            $free = if ($ld -and $ld.FreeSpace) { [math]::Round($ld.FreeSpace / 1GB, 2) } else { -1 }
+        }
+        $snap["disk_free_gb"] = $free
+    } else {
+        $snap["os"] = "Unknown"
+        $snap["disk_free_gb"] = -1
+    }
+
+    # Admin / user
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $snap["admin"] = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $snap["user"] = $identity.Name
+
+    # UAC
+    $uacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    $uac = (Get-ItemProperty -Path $uacPath -Name ConsentPromptBehaviorAdmin -ErrorAction SilentlyContinue).ConsentPromptBehaviorAdmin
+    $snap["uac_level"] = if ($null -eq $uac) { 5 } else { [int]$uac }
+
+    # .NET
+    $dotnetPaths = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -ErrorAction SilentlyContinue
+    if ($dotnetPaths) {
+        $v = $null
+        if ($dotnetPaths -is [array]) { $v = $dotnetPaths[0].GetValue("Version", $null) } else { $v = $dotnetPaths.GetValue("Version", $null) }
+        $snap["dotnet_version"] = if ($v) { $v } else { "未知" }
+    } else {
+        $snap["dotnet_version"] = "无"
+    }
+
+    # Pending reboot
+    $pending = $false
+    $val = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion" -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
+    if ($val -and $val.PendingFileRenameOperations) { $pending = $true }
+    $val2 = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" -ErrorAction SilentlyContinue
+    if ($val2) { $pending = $true }
+    $snap["pending_reboot"] = $pending
+
+    # MSI service
+    $msi = Get-Service -Name msiserver -ErrorAction SilentlyContinue
+    $snap["msi_service"] = if ($msi) { $msi.Status.ToString() } else { "Not Found" }
+
+    # Defender
+    try {
+        $def = Get-MpComputerStatus -ErrorAction Stop
+        $snap["defender"] = @{
+            real_time = $def.RealTimeProtectionEnabled
+            antivirus = $def.AntivirusEnabled
+            amsi      = $def.AMServiceEnabled
+        } | ConvertTo-Json -Compress
+    } catch {
+        $snap["defender"] = "Unknown"
+    }
+
+    # Core isolation
+    $ciReg = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" -Name "Enabled" -ErrorAction SilentlyContinue
+    $snap["core_isolation"] = if ($ciReg) { [bool]$ciReg.Enabled } else { $false }
+
+    # Event log errors (quick 5 / full 20)
+    $maxEvents = if ($Mode -eq 'full') { 20 } else { 5 }
+    $events = Get-WinEvent -FilterHashtable @{LogName='Application','System'; Level=2} -MaxEvents $maxEvents -ErrorAction SilentlyContinue
+    $snap["event_log_errors"] = @($events | ForEach-Object {
+        $msg = $_.Message
+        if ($msg.Length -gt 500) { $msg = $msg.Substring(0, 500) + "..." }
+        [PSCustomObject]@{
+            time    = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
+            log     = $_.LogName
+            source  = $_.ProviderName
+            eventId = $_.Id
+            message = @($msg -split "`n" | Select-Object -First 3) -join " | "
+        }
+    })
+
+    if ($Mode -eq 'full') {
+        # Firewall profile
+        try {
+            $snap["firewall"] = (Get-NetFirewallProfile -ErrorAction Stop | Select-Object Name, Enabled | ConvertTo-Json -Compress)
+        } catch { $snap["firewall"] = "Unknown" }
+
+        # Auto-start services stopped
+        $autoStopped = Get-Service | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } | Select-Object -First 20 Name,Status
+        $snap["auto_services_stopped"] = ($autoStopped | ConvertTo-Json -Compress)
+    }
+
+    return [PSCustomObject]$snap
+}
+
+function Format-CMSnapshotMarkdown {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Snapshot)
+    $lines = @("## 诊断快照", "")
+    $lines += "| 字段 | 值 |"
+    $lines += "|---|---|"
+    foreach ($p in $Snapshot.PSObject.Properties) {
+        $val = $p.Value
+        if ($val -is [System.Collections.IEnumerable] -and -not ($val -is [string])) {
+            $val = ($val | ForEach-Object { $_.ToString() }) -join "; "
+        }
+        $valStr = if ($null -eq $val) { "(空)" } else { ($val | Out-String).Trim() }
+        if ($valStr.Length -gt 200) { $valStr = $valStr.Substring(0, 200) + "..." }
+        $lines += "| $($p.Name) | $valStr |"
+    }
+    return ($lines -join "`n")
+}
 #endregion
 
 #region Parser
