@@ -507,9 +507,101 @@ function Invoke-CMCleanup {
 
 
 #region Software
-function Get-CMInstalledSoftware { Write-CMWarn "列出软件：开发中" }
-function Invoke-CMUninstallSoftware { Write-CMWarn "卸载：开发中" }
-function Invoke-CMRepairStoreApps { Write-CMWarn "Store 修复：开发中" }
+function Get-CMInstalledSoftware {
+    $paths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    )
+    $items = @()
+    foreach ($p in $paths) {
+        if (-not (Test-Path $p)) { continue }
+        $arch = if ($p -match 'WOW6432Node') { "x86" } elseif ($p -match 'HKCU') { "x64_user" } else { "x64" }
+        Get-ChildItem $p -ErrorAction SilentlyContinue | ForEach-Object {
+            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            $dn = if ($props.PSObject.Properties['DisplayName']) { $props.DisplayName } else { $null }
+            if ([string]::IsNullOrWhiteSpace($dn)) { return }
+            $items += [PSCustomObject]@{
+                name        = $dn
+                version     = if ($props.PSObject.Properties['DisplayVersion']) { $props.DisplayVersion } else { $null }
+                publisher   = if ($props.PSObject.Properties['Publisher']) { $props.Publisher } else { $null }
+                installDate = if ($props.PSObject.Properties['InstallDate']) { $props.InstallDate } else { $null }
+                uninstall   = if ($props.PSObject.Properties['UninstallString']) { $props.UninstallString } else { $null }
+                quietUninstall = if ($props.PSObject.Properties['QuietUninstallString']) { $props.QuietUninstallString } else { $null }
+                architecture = $arch
+            }
+        }
+    }
+    return $items | Sort-Object name -Unique
+}
+
+function Format-CMUninstallString {
+    param([string]$UninstallString)
+    if ([string]::IsNullOrWhiteSpace($UninstallString)) { return $null }
+    $cmd = $UninstallString.Trim()
+    $silent = $null
+    if ($cmd -match '(?i)msiexec\.exe\s+/[ixXI].*?\{([0-9A-Fa-f-]+)\}') {
+        $guid = $Matches[1]
+        $silent = [string]::Format("msiexec.exe /x{{{0}}} /qn REBOOT=ReallySuppress", $guid)
+    } elseif ($cmd -match '(?i)/S\b') {
+        $silent = $cmd
+    } elseif ($cmd -match '(?i)/silent\b') {
+        $silent = $cmd
+    } elseif ($cmd -match '(?i)/quiet\b') {
+        $silent = $cmd
+    }
+    return [PSCustomObject]@{ cmd = $cmd; silent = $silent }
+}
+
+function Invoke-CMUninstallSoftware {
+    $list = Get-CMInstalledSoftware | Where-Object { $_.uninstall }
+    if (-not $list) { Write-CMWarn "没有可卸载的软件"; return }
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $s = $list[$i]
+        Write-Host ("{0,4}. {1} ({2})" -f ($i+1), $s.name, $s.version)
+    }
+    $idx = Read-CMMenuChoice -Prompt "选择要卸载的编号（0取消）" -ValidChoices (@(0) + @(1..$list.Count))
+    if ($idx -eq 0) { return }
+    $target = $list[$idx - 1]
+    $parsed = Format-CMUninstallString -UninstallString $target.uninstall
+    Write-CMWarn "将执行：$($parsed.cmd)"
+    if ($parsed.silent) {
+        Write-CMWarn "可静默执行：$($parsed.silent)"
+        if (Read-CMConfirm -Prompt "使用静默模式？") {
+            $cmd = $parsed.silent
+        } else { $cmd = $parsed.cmd }
+    } else { $cmd = $parsed.cmd }
+    if (Read-CMConfirm -Prompt "确认卸载？") {
+        Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -Wait -NoNewWindow
+        Write-CMSuccess "已发送卸载命令。"
+    }
+}
+
+function Invoke-CMRepairStoreApps {
+    $choice = Read-CMMenuChoice -Prompt "选择修复操作 [1=重置 Store  2=重注册系统应用  3=清 Store 缓存 wsreset]" -ValidChoices @(1,2,3)
+    switch ($choice) {
+        1 {
+            $pkg = Get-AppxPackage -AllUsers Microsoft.WindowsStore -ErrorAction SilentlyContinue
+            if ($pkg) {
+                $pkg | Reset-AppxPackage
+                Write-CMSuccess "已重置 Microsoft Store"
+            } else {
+                Write-CMWarn "未找到 Microsoft Store 包"
+            }
+        }
+        2 {
+            if (-not (Read-CMConfirm -Prompt "将重新注册所有系统应用，可能耗时数分钟。继续？")) { return }
+            Get-AppxPackage -AllUsers | ForEach-Object {
+                Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue
+            }
+            Write-CMSuccess "已重注册所有系统应用"
+        }
+        3 {
+            Start-Process wsreset.exe -Wait
+            Write-CMSuccess "Store 缓存已清空"
+        }
+    }
+}
 #endregion
 
 #region Health
