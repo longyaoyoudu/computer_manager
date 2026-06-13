@@ -450,7 +450,9 @@ function Invoke-CMCleanupTarget {
     if ($handler -eq "RecycleBin") {
         if ($DryRun) { return @{ bytes = 0; ok = $true; note = "DRY RUN: 不清空" } }
         Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-        return @{ bytes = 0; ok = $true; note = "已清空回收站" }
+        $ok = $? -and $LASTEXITCODE -eq 0
+        $note = if ($ok) { "已清空回收站" } else { "清空回收站失败（exit=$LASTEXITCODE）" }
+        return @{ bytes = 0; ok = $ok; note = $note }
     }
     if ($handler -eq "WUAService") {
         if ($DryRun) { return @{ bytes = Get-CMCleanupSize -Path $Target.path; ok = $true; note = "DRY RUN" } }
@@ -466,9 +468,10 @@ function Invoke-CMCleanupTarget {
     }
     if ($pattern) {
         $files = Get-ChildItem -Path $Target.path -Filter $pattern -Force -ErrorAction SilentlyContinue
-        $sizeBefore = ($files | Measure-Object Length -Sum).Sum
+        $sizeBefore = ($files | Measure-Object Length -Sum -ErrorAction SilentlyContinue).Sum
+        if ($null -eq $sizeBefore) { $sizeBefore = 0 }
         if (-not $DryRun) { $files | Remove-Item -Force -ErrorAction SilentlyContinue }
-        return @{ bytes = $sizeBefore; ok = $true; note = "匹配 $pattern" }
+        return @{ bytes = [long]$sizeBefore; ok = $true; note = "匹配 $pattern" }
     }
     if (-not (Test-Path $Target.path)) {
         return @{ bytes = 0; ok = $true; note = "路径不存在，跳过" }
