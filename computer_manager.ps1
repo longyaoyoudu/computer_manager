@@ -563,6 +563,9 @@ function Invoke-CMUninstallSoftware {
     $idx = Read-CMMenuChoice -Prompt "选择要卸载的编号（0取消）" -ValidChoices (@(0) + @(1..$list.Count))
     if ($idx -eq 0) { return }
     $target = $list[$idx - 1]
+    if ($Script:CMLogger) {
+        Write-CMLog -Logger $Script:CMLogger -Level "USER" -Source "SOFTWARE" -Message "Selected: $($target.name) ($($target.version)) arch=$($target.architecture)"
+    }
     $parsed = Format-CMUninstallString -UninstallString $target.uninstall
     Write-CMWarn "将执行：$($parsed.cmd)"
     if ($parsed.silent) {
@@ -572,6 +575,9 @@ function Invoke-CMUninstallSoftware {
         } else { $cmd = $parsed.cmd }
     } else { $cmd = $parsed.cmd }
     if (Read-CMConfirm -Prompt "确认卸载？") {
+        if ($Script:CMLogger) {
+            Write-CMLog -Logger $Script:CMLogger -Level "CMD" -Source "SOFTWARE" -Message "uninstall: $($target.name) ($($target.version)) cmd=`"$cmd`""
+        }
         Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -Wait -NoNewWindow
         Write-CMSuccess "已发送卸载命令。"
     }
@@ -581,6 +587,7 @@ function Invoke-CMRepairStoreApps {
     $choice = Read-CMMenuChoice -Prompt "选择修复操作 [1=重置 Store  2=重注册系统应用  3=清 Store 缓存 wsreset]" -ValidChoices @(1,2,3)
     switch ($choice) {
         1 {
+            if ($Script:CMLogger) { Write-CMLog -Logger $Script:CMLogger -Level "CMD" -Source "STORE" -Message "Reset-AppxPackage Microsoft.WindowsStore" }
             $pkg = Get-AppxPackage -AllUsers Microsoft.WindowsStore -ErrorAction SilentlyContinue
             if ($pkg) {
                 $pkg | Reset-AppxPackage
@@ -590,6 +597,7 @@ function Invoke-CMRepairStoreApps {
             }
         }
         2 {
+            if ($Script:CMLogger) { Write-CMLog -Logger $Script:CMLogger -Level "CMD" -Source "STORE" -Message "Re-register all system apps" }
             if (-not (Read-CMConfirm -Prompt "将重新注册所有系统应用，可能耗时数分钟。继续？")) { return }
             Get-AppxPackage -AllUsers | ForEach-Object {
                 Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml" -ErrorAction SilentlyContinue
@@ -597,6 +605,7 @@ function Invoke-CMRepairStoreApps {
             Write-CMSuccess "已重注册所有系统应用"
         }
         3 {
+            if ($Script:CMLogger) { Write-CMLog -Logger $Script:CMLogger -Level "CMD" -Source "STORE" -Message "wsreset.exe (clear Store cache)" }
             Start-Process wsreset.exe -Wait
             Write-CMSuccess "Store 缓存已清空"
         }
