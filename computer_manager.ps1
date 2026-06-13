@@ -411,13 +411,8 @@ function Get-CMHealthReport {
         $lastBoot = $os.LastBootUpTime
         $uptimeDays = [math]::Round(((Get-Date) - $lastBoot).TotalDays, 1)
         $r["os"] = "$($os.Caption) build $($os.BuildNumber) (启动 $uptimeDays 天)"
-    }
-
-    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
-    $mem = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-    if ($mem) {
-        $totalGB = [math]::Round($mem.TotalVisibleMemorySize / 1MB, 1)
-        $freeGB  = [math]::Round($mem.FreePhysicalMemory / 1MB, 1)
+        $totalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+        $freeGB  = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
         $r["memory"] = [PSCustomObject]@{ total_gb = $totalGB; free_gb = $freeGB }
     }
 
@@ -434,7 +429,7 @@ function Get-CMHealthReport {
         }
     })
 
-    $r["auto_services_stopped"] = @(Get-Service |
+    $r["auto_services_stopped"] = @(Get-Service -ErrorAction SilentlyContinue |
         Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } |
         Select-Object -ExpandProperty Name -First 20)
 
@@ -463,7 +458,12 @@ function Format-CMHealthMarkdown {
         if ($val -is [System.Collections.IEnumerable] -and -not ($val -is [string])) {
             if ($val.Count -eq 0) {
                 $lines += "（无）"
-            } elseif (-not ($val[0] -is [string]) -and -not ($val[0] -is [hashtable]) -and -not ($val[0] -is [valuetype])) {
+            } elseif ($val[0] -is [string] -or $val[0] -is [hashtable] -or $val[0] -is [valuetype]) {
+                foreach ($item in $val) {
+                    $s = if ($null -eq $item) { "" } else { "$item" }
+                    $lines += "- $s"
+                }
+            } else {
                 $lines += "| " + (($val[0].PSObject.Properties.Name) -join " | ") + " |"
                 $lines += "|" + ((@($val[0].PSObject.Properties.Name) | ForEach-Object { "---" }) -join "|") + "|"
                 foreach ($item in $val) {
@@ -474,8 +474,6 @@ function Format-CMHealthMarkdown {
                     })
                     $lines += "| " + ($cells -join " | ") + " |"
                 }
-            } else {
-                $lines += "``$val``".Replace('`$val', ($val | Out-String).Trim())
             }
         } else {
             $lines += "``$val``".Replace('`$val', ($val | Out-String).Trim())
