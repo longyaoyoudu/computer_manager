@@ -389,10 +389,119 @@ function Invoke-CMDiagnose {
 #endregion
 
 #region Cleanup
+function Get-CMCleanupTargets {
+    $targets = @(
+        [PSCustomObject]@{
+            name        = "用户临时文件"
+            path        = $env:TEMP
+            description = "%TEMP% 内容"
+            safe        = $true
+        },
+        [PSCustomObject]@{
+            name        = "本地临时文件"
+            path        = $env:LOCALAPPDATA + "\Temp"
+            description = "%LOCALAPPDATA%\Temp 内容"
+            safe        = $true
+        },
+        [PSCustomObject]@{
+            name        = "缩略图缓存"
+            path        = $env:LOCALAPPDATA + "\Microsoft\Windows\Explorer"
+            description = "thumbcache_*.db 文件"
+            safe        = $true
+            pattern     = "thumbcache_*.db"
+        },
+        [PSCustomObject]@{
+            name        = "回收站"
+            path        = "::RECYCLE::"
+            description = "清空回收站"
+            safe        = $true
+            handler     = "RecycleBin"
+        },
+        [PSCustomObject]@{
+            name        = "Windows Update 下载缓存"
+            path        = "C:\Windows\SoftwareDistribution\Download"
+            description = "已下载的更新包"
+            safe        = $false
+            handler     = "WUAService"
+        }
+    )
+    return $targets
+}
+
+function Get-CMCleanupSize {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path $Path)) { return 0 }
+    try {
+        $sum = (Get-ChildItem -Path $Path -Recurse -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+        if ($null -eq $sum) { return 0 }
+        return [long]$sum
+    } catch { return 0 }
+}
+
+function Invoke-CMCleanupTarget {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Target, [switch]$DryRun)
+    $handler = $null
+    if ($Target.PSObject.Properties.Name -contains 'handler') { $handler = $Target.handler }
+    $pattern = $null
+    if ($Target.PSObject.Properties.Name -contains 'pattern') { $pattern = $Target.pattern }
+    if ($handler -eq "RecycleBin") {
+        if ($DryRun) { return @{ bytes = 0; ok = $true; note = "DRY RUN: 不清空" } }
+        Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+        return @{ bytes = 0; ok = $true; note = "已清空回收站" }
+    }
+    if ($handler -eq "WUAService") {
+        if ($DryRun) { return @{ bytes = Get-CMCleanupSize -Path $Target.path; ok = $true; note = "DRY RUN" } }
+        $svc = Get-Service wuauserv -ErrorAction SilentlyContinue
+        $wasRunning = $svc -and $svc.Status -eq 'Running'
+        if ($wasRunning) { Stop-Service wuauserv -Force -ErrorAction SilentlyContinue }
+        $sizeBefore = Get-CMCleanupSize -Path $Target.path
+        try {
+            Get-ChildItem $Target.path -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        } catch {}
+        if ($wasRunning) { Start-Service wuauserv -ErrorAction SilentlyContinue }
+        return @{ bytes = $sizeBefore; ok = $true; note = "已清理 WU 缓存" }
+    }
+    if ($pattern) {
+        $files = Get-ChildItem -Path $Target.path -Filter $pattern -Force -ErrorAction SilentlyContinue
+        $sizeBefore = ($files | Measure-Object Length -Sum).Sum
+        if (-not $DryRun) { $files | Remove-Item -Force -ErrorAction SilentlyContinue }
+        return @{ bytes = $sizeBefore; ok = $true; note = "匹配 $pattern" }
+    }
+    if (-not (Test-Path $Target.path)) {
+        return @{ bytes = 0; ok = $true; note = "路径不存在，跳过" }
+    }
+    $sizeBefore = Get-CMCleanupSize -Path $Target.path
+    if (-not $DryRun) {
+        Get-ChildItem -Path $Target.path -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.PSIsContainer } | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    return @{ bytes = $sizeBefore; ok = $true; note = "普通目录清理" }
+}
+
 function Invoke-CMCleanup {
-    Write-CMWarn "清理模块开发中（任务 9）"
+    [CmdletBinding()]
+    param([switch]$DryRun, [switch]$Force)
+    $targets = Get-CMCleanupTargets
+    $totalBefore = 0
+    $results = @()
+    foreach ($t in $targets) {
+        if (-not $t.safe -and -not $Force) {
+            $results += [PSCustomObject]@{ name = $t.name; bytes = 0; ok = $true; note = "需 --force 跳过" }
+            continue
+        }
+        $r = Invoke-CMCleanupTarget -Target $t -DryRun:$DryRun
+        $results += [PSCustomObject]@{ name = $t.name; bytes = $r.bytes; ok = $r.ok; note = $r.note }
+        $totalBefore += $r.bytes
+        Write-Host ("  {0,-30}  {1,12}  {2}" -f $t.name, (Format-CMBytes $r.bytes), $r.note)
+    }
+    $action = if ($DryRun) { "预估" } else { "已回收" }
+    Write-CMSuccess "$action 总大小：$(Format-CMBytes $totalBefore)"
 }
 #endregion
+
 
 #region Software
 function Get-CMInstalledSoftware { Write-CMWarn "列出软件：开发中" }
