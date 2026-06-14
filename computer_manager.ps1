@@ -374,6 +374,65 @@ function Format-CMSnapshotMarkdown {
 #endregion
 
 #region Parser
+function Get-CMSystemDirs {
+    return @(
+        "$env:WINDIR\",
+        "$env:WINDIR\System32\",
+        "${env:ProgramFiles}\",
+        "${env:ProgramFiles(x86)}\",
+        "${env:ProgramData}\",
+        "$env:SYSTEMROOT\"
+    ) | ForEach-Object { $_.TrimEnd('\') + '\' }
+}
+
+function Test-CMCommandAllowed {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        $SafetyConfig
+    )
+    $result = [PSCustomObject]@{
+        allowed = $true
+        reason  = ''
+        risk    = 'low'
+    }
+    if ($null -eq $SafetyConfig) { $SafetyConfig = @{ allow_encoded_commands = $false; allow_iex = $false } }
+    if (-not $SafetyConfig.ContainsKey('allow_encoded_commands')) { $SafetyConfig['allow_encoded_commands'] = $false }
+    if (-not $SafetyConfig.ContainsKey('allow_iex')) { $SafetyConfig['allow_iex'] = $false }
+
+    if ($Command -match '[\r\n]') {
+        $result.allowed = $false; $result.reason = '命令包含换行符'; return $result
+    }
+
+    if ($Command -match '\s&\s|\s&&\s|\s\|\|\s') {
+        $result.allowed = $false; $result.reason = '命令包含 cmd 链式操作符'; return $result
+    }
+
+    if (-not $SafetyConfig['allow_encoded_commands']) {
+        if ($Command -match '(?i)-EncodedCommand|-EC\b|FromBase64String') {
+            $result.allowed = $false; $result.reason = '包含被禁用的编码命令'; return $result
+        }
+    }
+    if (-not $SafetyConfig['allow_iex']) {
+        if ($Command -match '(?i)\bInvoke-Expression\b|\biex\s') {
+            $result.allowed = $false; $result.reason = '包含被禁用的 Invoke-Expression'; return $result
+        }
+    }
+
+    $sysDirs = Get-CMSystemDirs
+    $isDangerousRemoval = $Command -match '(?i)\b(Remove-Item|rd|rmdir)\b'
+    if ($isDangerousRemoval) {
+        foreach ($d in $sysDirs) {
+            if ($Command -match [Regex]::Escape($d)) {
+                $result.risk = 'high'
+                $result.reason = '目标命令系统目录 ' + $d
+                break
+            }
+        }
+    }
+
+    return $result
+}
 #endregion
 
 #region Dispatcher
