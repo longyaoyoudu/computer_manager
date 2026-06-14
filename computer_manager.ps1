@@ -400,27 +400,48 @@ function Test-CMCommandAllowed {
     if (-not $SafetyConfig.ContainsKey('allow_encoded_commands')) { $SafetyConfig['allow_encoded_commands'] = $false }
     if (-not $SafetyConfig.ContainsKey('allow_iex')) { $SafetyConfig['allow_iex'] = $false }
 
+    # Internal helper: reject + log
+    $rejectScript = {
+        param($reason)
+        $result.allowed = $false
+        $result.reason = $reason
+        if ($Script:CMLogger) {
+            try { Write-CMLog -Logger $Script:CMLogger -Level 'WARN' -Source 'PARSER' -Message "rejected: $Command reason=$reason" } catch {}
+        }
+        return $result
+    }
+
+    # 1. Multi-line
     if ($Command -match '[\r\n]') {
-        $result.allowed = $false; $result.reason = '命令包含换行符'; return $result
+        return (& $rejectScript '命令包含换行符')
     }
 
+    # 2. Quote-aware chain operator check
+    # Conservative: check the raw command. `cmd /c "dir & del"` would still
+    # be a chain at the OS level, so we keep the `&` detection strict.
+    # The regex matches `&` (and `&&`, `||`) only when surrounded by whitespace,
+    # which avoids false positives on URL params, paths, etc.
     if ($Command -match '\s&\s|\s&&\s|\s\|\|\s') {
-        $result.allowed = $false; $result.reason = '命令包含 cmd 链式操作符'; return $result
+        return (& $rejectScript '命令包含 cmd 链式操作符')
     }
 
+    # 3. Encoded command
     if (-not $SafetyConfig['allow_encoded_commands']) {
         if ($Command -match '(?i)-EncodedCommand|-EC\b|FromBase64String') {
-            $result.allowed = $false; $result.reason = '包含被禁用的编码命令'; return $result
-        }
-    }
-    if (-not $SafetyConfig['allow_iex']) {
-        if ($Command -match '(?i)\bInvoke-Expression\b|\biex\s') {
-            $result.allowed = $false; $result.reason = '包含被禁用的 Invoke-Expression'; return $result
+            return (& $rejectScript '包含被禁用的编码命令')
         }
     }
 
+    # 4. Invoke-Expression (use word boundary to catch iex;calc, iex|cmd)
+    if (-not $SafetyConfig['allow_iex']) {
+        if ($Command -match '(?i)\bInvoke-Expression\b|\biex\b') {
+            return (& $rejectScript '包含被禁用的 Invoke-Expression')
+        }
+    }
+
+    # 5. System dir risk: also check for `del` and `erase` CMD built-ins
     $sysDirs = Get-CMSystemDirs
-    $isDangerousRemoval = $Command -match '(?i)\b(Remove-Item|rd|rmdir)\b'
+    $isDangerousRemoval = $Command -match '(?i)\b(Remove-Item|rd|rmdir|del|erase)\b'
     if ($isDangerousRemoval) {
         foreach ($d in $sysDirs) {
             if ($Command -match [Regex]::Escape($d)) {

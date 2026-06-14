@@ -62,6 +62,26 @@ Describe 'Test-CMCommandAllowed' {
         $r.allowed | Should Be $true
         $r.risk | Should Be 'high'
     }
+
+    It '拒绝引号内隐藏的 & 链' {
+        $r = Test-CMCommandAllowed -Command 'cmd /c "dir & del C:\Windows"' -SafetyConfig $null
+        $r.allowed | Should Be $false
+    }
+
+    It '拒绝 iex 紧接分号（无空格）' {
+        $r = Test-CMCommandAllowed -Command "iex;Get-Process" -SafetyConfig $null
+        $r.allowed | Should Be $false
+    }
+
+    It '拒绝 iex 后接管道' {
+        $r = Test-CMCommandAllowed -Command "iex|calc" -SafetyConfig $null
+        $r.allowed | Should Be $false
+    }
+
+    It 'del 命令命中系统目录时标记高风险' {
+        $r = Test-CMCommandAllowed -Command "del /q /f C:\Windows\System32\foo.txt" -SafetyConfig $null
+        $r.risk | Should Be "high"
+    }
 }
 
 Describe 'Get-CMSystemDirs' {
