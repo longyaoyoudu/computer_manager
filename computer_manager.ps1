@@ -483,18 +483,21 @@ function Invoke-CMExecuteCommand {
         [ValidateSet('ps','cmd')][string]$Dispatch,
         [int]$TimeoutSec = 60
     )
+    if ($Script:CMLogger) {
+        try { Write-CMLog -Logger $Script:CMLogger -Level "CMD" -Source "DISPATCH" -Message "${Dispatch}: $Command" } catch {}
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         if ($Dispatch -eq "ps") {
             $out = powershell.exe -NoProfile -Command "`$ErrorActionPreference='Stop'; $Command" 2>&1
             $ec = $LASTEXITCODE
             $stdout = ($out | Out-String).Trim()
-            $stderr = ""
+            $stderr = "(merged into stdout; see .stdout)"
         } else {
             $out = cmd.exe /c $Command 2>&1
             $ec = $LASTEXITCODE
             $stdout = ($out | Out-String).Trim()
-            $stderr = ""
+            $stderr = "(merged into stdout; see .stdout)"
         }
     } catch {
         $ec = 1
