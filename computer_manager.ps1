@@ -457,6 +457,60 @@ function Test-CMCommandAllowed {
 #endregion
 
 #region Dispatcher
+$Script:CMNativeWhitelist = @(
+    'Get-','Set-','Start-','Stop-','Restart-','New-','Remove-','Add-','Clear-',
+    'Update-','Test-','Resolve-','Register-','Unregister-','Reset-','Repair-',
+    'Get','Set','Dism','sfc','msiexec','pnputil','bcdedit','powercfg',
+    'netsh','reg','wmic','net','gpupdate','takeown',
+    'icacls','robocopy','xcopy','copy','del','rd','rmdir','mkdir','move','ren',
+    'where','findstr','find','sort','more','type','attrib','compact','expand'
+)
+
+function Get-CMCommandDispatch {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Command)
+    $first = ($Command.Trim() -split '\s+')[0]
+    foreach ($w in $Script:CMNativeWhitelist) {
+        if ($first -like "$w*") { return "ps" }
+    }
+    return "cmd"
+}
+
+function Invoke-CMExecuteCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [ValidateSet('ps','cmd')][string]$Dispatch,
+        [int]$TimeoutSec = 60
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        if ($Dispatch -eq "ps") {
+            $out = powershell.exe -NoProfile -Command "`$ErrorActionPreference='Stop'; $Command" 2>&1
+            $ec = $LASTEXITCODE
+            $stdout = ($out | Out-String).Trim()
+            $stderr = ""
+        } else {
+            $out = cmd.exe /c $Command 2>&1
+            $ec = $LASTEXITCODE
+            $stdout = ($out | Out-String).Trim()
+            $stderr = ""
+        }
+    } catch {
+        $ec = 1
+        $stdout = ""
+        $stderr = $_.Exception.Message
+    }
+    $sw.Stop()
+    return [PSCustomObject]@{
+        command  = $Command
+        dispatch = $Dispatch
+        exitCode = $ec
+        stdout   = $stdout
+        stderr   = $stderr
+        durationSec = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+    }
+}
 #endregion
 
 #region LLM
