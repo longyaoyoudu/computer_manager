@@ -67,6 +67,6 @@ Describe 'Test-CMCommandAllowed' {
 Describe 'Get-CMSystemDirs' {
     It '应返回系统目录前缀列表' {
         $dirs = Get-CMSystemDirs
-        $dirs | Should Match 'C:\\Windows'
+        [bool]($dirs -match 'C:.Windows') | Should Be $true
     }
 }
