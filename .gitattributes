@@ -1,0 +1,11 @@
+# Force CRLF for PowerShell scripts and tests (PS 5.1 requires CRLF on Chinese-locale Windows)
+*.ps1    text eol=crlf
+*.psm1   text eol=crlf
+
+# Tests must also be CRLF (Pester + Chinese in It descriptions)
+*.Tests.ps1  text eol=crlf
+
+# Other text files
+*.md     text eol=crlf
+*.json   text eol=crlf
+*.bat    text eol=crlf
