@@ -517,6 +517,151 @@ function Invoke-CMExecuteCommand {
 #endregion
 
 #region LLM
+$Script:CMSystemPrompt = @'
+
+
+
+
+
+
+
+
+
+
+
+
+
+'@
+
+function Get-CMSubmitDiagnosisSchema {
+    return @{
+        type = "function"
+        function = @{
+            name = "submit_diagnosis"
+            description = "提交应用安装问题的诊断结论和修复命令"
+            parameters = @{
+                type = "object"
+                properties = @{
+                    analysis    = @{ type = "string"; description = "1-3 句话的诊断分析" }
+                    root_cause  = @{ type = "string"; description = "最可能的原因，单句" }
+                    risk_level  = @{ type = "string"; enum = @("low","medium","high") }
+                    commands = @{
+                        type = "array"
+                        items = @{
+                            type = "object"
+                            properties = @{
+                                id = @{ type = "integer" }
+                                description = @{ type = "string" }
+                                command = @{ type = "string"; description = "单行命令" }
+                                expected_effect = @{ type = "string" }
+                                rollback_hint = @{ type = "string" }
+                            }
+                            required = @("id","description","command")
+                        }
+                    }
+                    notes = @{ type = "string" }
+                }
+                required = @("analysis","root_cause","risk_level","commands")
+            }
+        }
+    }
+}
+
+function Invoke-CMLLMChat {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)][string]$UserMessage,
+        [int]$TimeoutSec = $Config.llm.timeout_seconds
+    )
+    $baseUrl = $Config.llm.base_url.TrimEnd('/')
+    $uri = "$baseUrl/chat/completions"
+
+    $body = @{
+        model = $Config.llm.model
+        messages = @(
+            @{ role = "system"; content = $Script:CMSystemPrompt }
+            @{ role = "user";   content = $UserMessage }
+        )
+        tools = @(Get-CMSubmitDiagnosisSchema)
+        tool_choice = @{ type = "function"; function = @{ name = "submit_diagnosis" } }
+        temperature = $Config.llm.temperature
+        max_tokens = $Config.llm.max_response_tokens
+    } | ConvertTo-Json -Depth 20
+
+    $headers = @{
+        "Authorization" = "Bearer $($Config.llm.api_key)"
+        "Content-Type"  = "application/json"
+    }
+
+    $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -TimeoutSec $TimeoutSec
+    return ConvertFrom-CMLLMResponse -Raw $resp
+}
+
+function ConvertFrom-CMLLMResponse {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Raw,
+        [switch]$FallbackText
+    )
+    # StrictMode-safe property accessor: hashtable uses ContainsKey, PSObject uses Properties.Name
+    function script:Get-CMSafeProp($obj, $name) {
+        if ($obj -is [hashtable]) {
+            if ($obj.ContainsKey($name)) { return $obj[$name] } else { return $null }
+        } elseif ($obj) {
+            $names = $obj.PSObject.Properties.Name
+            if ($names -contains $name) { return $obj.$name } else { return $null }
+        } else {
+            return $null
+        }
+    }
+
+    $msg = $Raw.choices[0].message
+    $parsed = $null
+
+    # 1) tool_calls
+    $tc = Get-CMSafeProp $msg 'tool_calls'
+    if ($tc) {
+        # PowerShell unwraps single-element arrays, so $tc may be the first call directly
+        # Ensure we have a single item (call). If it's an array, take first; if not, use as-is.
+        $tc0 = if ($tc -is [System.Array]) { $tc[0] } else { $tc }
+        $func = Get-CMSafeProp $tc0 'function'
+        $args = if ($func) { Get-CMSafeProp $func 'arguments' } else { $null }
+        if ($args -is [string]) {
+            try { $parsed = $args | ConvertFrom-Json } catch { $parsed = $null }
+        } elseif ($args -is [PSCustomObject] -or $args -is [hashtable]) {
+            $parsed = $args
+        }
+    }
+
+    # 2) text content fallback
+    if (-not $parsed) {
+        $txt = Get-CMSafeProp $msg 'content'
+        if ($txt) {
+            $m = [Regex]::Match($txt, '(?s)```(?:json)?\s*(\{.*?\})\s*```')
+            $candidate = if ($m.Success) { $m.Groups[1].Value } else {
+                $i = $txt.IndexOf('{'); $j = $txt.LastIndexOf('}')
+                if ($i -ge 0 -and $j -gt $i) { $txt.Substring($i, $j - $i + 1) } else { $null }
+            }
+            if ($candidate) {
+                try { $parsed = $candidate | ConvertFrom-Json } catch { $parsed = $null }
+            }
+            if (-not $parsed -and $FallbackText) {
+                $parsed = [PSCustomObject]@{
+                    analysis = $txt
+                    root_cause = "(model returned unstructured result)"
+                    risk_level = "unknown"
+                    commands = @()
+                }
+            }
+        }
+    }
+
+    if (-not $parsed) {
+        throw "Cannot parse LLM response: $($msg | Out-String)"
+    }
+    return $parsed
+}
 #endregion
 
 #region Diagnose
