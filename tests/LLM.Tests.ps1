@@ -66,3 +66,43 @@ Describe "ConvertFrom-CMLLMResponse (text JSON fallback)" {
         $r.analysis | Should Be 'not JSON text'
     }
 }
+
+Describe "ConvertFrom-CMLLMResponse (edge cases)" {
+    It 'should throw when choices is missing' {
+        $raw = @{ error = 'rate limited' }
+        { ConvertFrom-CMLLMResponse -Raw $raw } | Should Throw
+    }
+
+    It 'should take first tool_call when multiple present' {
+        $raw = @{
+            choices = @(@{
+                message = @{
+                    tool_calls = @(
+                        @{ function = @{ name = 'submit_diagnosis'; arguments = '{"analysis":"first","root_cause":"r","risk_level":"low","commands":[]}' } },
+                        @{ function = @{ name = 'submit_diagnosis'; arguments = '{"analysis":"second","root_cause":"r","risk_level":"low","commands":[]}' } }
+                    )
+                }
+            })
+        }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw
+        $r.analysis | Should Be 'first'
+    }
+
+    It 'should fall back to text when tool_call arguments are malformed' {
+        $raw = @{
+            choices = @(@{
+                message = @{
+                    tool_calls = @(@{ function = @{ name = 'submit_diagnosis'; arguments = '{not valid json' } })
+                    content = 'plain text response'
+                }
+            })
+        }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.analysis | Should Be 'plain text response'
+    }
+
+    It 'should throw when no parseable content' {
+        $raw = @{ choices = @(@{ message = @{ content = 'no braces here' } }) }
+        { ConvertFrom-CMLLMResponse -Raw $raw } | Should Throw
+    }
+}

@@ -594,7 +594,12 @@ function Invoke-CMLLMChat {
         "Content-Type"  = "application/json"
     }
 
-    $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -TimeoutSec $TimeoutSec
+    try {
+        $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -TimeoutSec $TimeoutSec -ErrorAction Stop
+    } catch {
+        if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "LLM" -Message "HTTP 调用 失败: $($_.Exception.Message)" } catch {} }
+        throw "LLM HTTP 调用失败：$($_.Exception.Message)"
+    }
     return ConvertFrom-CMLLMResponse -Raw $resp
 }
 
@@ -616,19 +621,21 @@ function ConvertFrom-CMLLMResponse {
         }
     }
 
-    $msg = $Raw.choices[0].message
+    $choices = Get-CMSafeProp $Raw 'choices'
+    $firstChoice = if ($choices -is [System.Collections.IList] -and $choices.Count -gt 0) { $choices[0] } elseif ($choices) { $choices } else { $null }
+    $msg = if ($firstChoice) { Get-CMSafeProp $firstChoice 'message' } else { $null }
     $parsed = $null
+    $parseError = $null
 
     # 1) tool_calls
     $tc = Get-CMSafeProp $msg 'tool_calls'
     if ($tc) {
-        # PowerShell unwraps single-element arrays, so $tc may be the first call directly
-        # Ensure we have a single item (call). If it's an array, take first; if not, use as-is.
-        $tc0 = if ($tc -is [System.Array]) { $tc[0] } else { $tc }
+        # PowerShell unwraps single-element arrays; if it is an array, take the first; otherwise use as-is.
+        $tc0 = if ($tc -is [System.Collections.IList] -and $tc.Count -gt 0) { $tc[0] } else { $tc }
         $func = Get-CMSafeProp $tc0 'function'
         $args = if ($func) { Get-CMSafeProp $func 'arguments' } else { $null }
         if ($args -is [string]) {
-            try { $parsed = $args | ConvertFrom-Json } catch { $parsed = $null }
+            try { $parsed = $args | ConvertFrom-Json -ErrorAction Stop } catch { $parseError = "函数 调用 失败: $($_.Exception.Message)" }
         } elseif ($args -is [PSCustomObject] -or $args -is [hashtable]) {
             $parsed = $args
         }
@@ -640,16 +647,17 @@ function ConvertFrom-CMLLMResponse {
         if ($txt) {
             $m = [Regex]::Match($txt, '(?s)```(?:json)?\s*(\{.*?\})\s*```')
             $candidate = if ($m.Success) { $m.Groups[1].Value } else {
+                # 试: 截取首尾花括号
                 $i = $txt.IndexOf('{'); $j = $txt.LastIndexOf('}')
                 if ($i -ge 0 -and $j -gt $i) { $txt.Substring($i, $j - $i + 1) } else { $null }
             }
             if ($candidate) {
-                try { $parsed = $candidate | ConvertFrom-Json } catch { $parsed = $null }
+                try { $parsed = $candidate | ConvertFrom-Json -ErrorAction Stop } catch { if (-not $parseError) { $parseError = "文本 内容 解析: $($_.Exception.Message)" } }
             }
             if (-not $parsed -and $FallbackText) {
                 $parsed = [PSCustomObject]@{
                     analysis = $txt
-                    root_cause = "(模型未返回结构化结果)"
+                    root_cause = "（模型未返回结构化结果）"
                     risk_level = "unknown"
                     commands = @()
                 }
@@ -658,7 +666,8 @@ function ConvertFrom-CMLLMResponse {
     }
 
     if (-not $parsed) {
-        throw "无法解析 LLM 响应：$($msg | Out-String)"
+        $suffix = if ($parseError) { " [$parseError]" } else { "" }
+        throw "无法解析 LLM 响应：$($msg | Out-String)$suffix"
     }
     return $parsed
 }
