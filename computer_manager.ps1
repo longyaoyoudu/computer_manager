@@ -674,8 +674,198 @@ function ConvertFrom-CMLLMResponse {
 #endregion
 
 #region Diagnose
+function New-CMDiagnosisContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$AppName,
+        [Parameter(Mandatory)][string]$ErrorText,
+        [string]$TriedActions
+    )
+    return [PSCustomObject]@{
+        snapshot = $Snapshot
+        app      = $AppName
+        error    = $ErrorText
+        tried    = $TriedActions
+    }
+}
+
+function Format-CMDiagnosisUserMessage {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Context)
+    $snapJson = $Context.snapshot | ConvertTo-Json -Depth 5 -Compress
+    $lines = @(
+        '## 诊断快照',
+        '```json',
+        $snapJson,
+        '```',
+        '',
+        '## 用户描述',
+        "- 应用名：$($Context.app)",
+        "- 报错：$($Context.error)",
+        "- 已尝试：$($Context.tried)"
+    )
+    return ($lines -join "`n")
+}
+
+function Confirm-CMCommandRun {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Cmd,
+        [int]$Index,
+        [int]$Total,
+        [string]$SimulateInput
+    )
+    $table = @"
+  [$Index/$Total]  风险: $($Cmd.risk)
+  描述: $($Cmd.description)
+  命令: $($Cmd.command)
+  预期: $($Cmd.expected_effect)
+"@
+    Write-Host $table
+    return Read-CMConfirm -Prompt "执行？" -DefaultYes $false -SimulateInput $SimulateInput
+}
+
 function Invoke-CMDiagnose {
-    Write-CMWarn "诊断模块开发中（任务 14-19）"
+    if (-not $Script:CMConfig.llm.api_key -or $Script:CMConfig.llm.api_key -eq "REPLACE_WITH_YOUR_KEY") {
+        Write-CMWarn "请先在 config.json 中填入 api_key（菜单 6 → 设置）。"
+        return
+    }
+
+    # 1) Snapshot
+    $mode = $Script:CMConfig.behavior.snapshot_mode
+    Write-CMInfo "[1/4] 收集诊断快照 (mode=$mode)..."
+    $snap = Get-CMSnapshot -Mode $mode
+    $cmdMax = 2000
+    if ($Script:CMConfig.behavior.PSObject.Properties.Name -contains "max_command_length") {
+        $cmdMax = [int]$Script:CMConfig.behavior.max_command_length
+    }
+
+    # 2) User input
+    Write-CMInfo "[2/4] 请描述问题："
+    $app     = (Read-Host "  目标应用").Trim()
+    $err     = (Read-Host "  报错信息").Trim()
+    $tried   = (Read-Host "  已尝试操作（可空）").Trim()
+    if ([string]::IsNullOrWhiteSpace($app) -or [string]::IsNullOrWhiteSpace($err)) {
+        Write-CMWarn "应用名和报错信息必填"; return
+    }
+    $ctx = New-CMDiagnosisContext -Snapshot $snap -AppName $app -ErrorText $err -TriedActions $tried
+    $userMsg = Format-CMDiagnosisUserMessage -Context $ctx
+
+    # 3) LLM
+    Write-CMInfo "[3/4] 调用 LLM..."
+    $safety = $Script:CMConfig.safety
+    try {
+        $resp = Invoke-CMLLMChat -Config $Script:CMConfig -UserMessage $userMsg
+    } catch {
+        Write-CMError "LLM 调用失败：$($_.Exception.Message)"
+        if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "LLM" -Message $_.ToString() } catch {} }
+        return
+    }
+    Write-CMSuccess "分析：$($resp.analysis)"
+    Write-CMInfo  "根因：$($resp.root_cause)"
+    Write-CMWarn  "风险：$($resp.risk_level)"
+
+    # 4) Execute
+    $approved = @()
+    if (-not $resp.commands -or $resp.commands.Count -eq 0) {
+        Write-CMWarn "模型未返回可执行命令"
+    } else {
+        $i = 0
+        foreach ($c in $resp.commands) {
+            $i++
+            $safetyCheck = Test-CMCommandAllowed -Command $c.command -SafetyConfig $safety
+            if (-not $safetyCheck.allowed) {
+                Write-CMWarn "  [$i] 被解析防护拒绝：$($safetyCheck.reason)  → 跳过"
+                if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "WARN" -Source "PARSER" -Message "REJECTED [$i] $($c.command): $($safetyCheck.reason)" } catch {} }
+                continue
+            }
+            $effectiveRisk = $safetyCheck.risk
+            $cmdObj = [PSCustomObject]@{
+                id = $c.id
+                description = $c.description
+                command = $c.command
+                expected_effect = $c.expected_effect
+                rollback_hint = $c.rollback_hint
+                risk = $effectiveRisk
+                Result = $null
+            }
+            if ($cmdObj.command.Length -gt $cmdMax) {
+                Write-CMWarn "  [$i] 命令超过 $cmdMax 字符，需要 FORCE 确认"
+                $ok = Read-CMConfirm -Prompt "  输入 FORCE 以继续执行" -SimulateInput "FORCE"
+                if ($ok -ne $true) { continue }
+            }
+            if ($effectiveRisk -eq "high") {
+                Write-CMError "  [!!] 高风险命令，需二次确认"
+            }
+            $ok = Confirm-CMCommandRun -Cmd $cmdObj -Index $i -Total $resp.commands.Count
+            if ($ok) {
+                $dispatch = Get-CMCommandDispatch -Command $cmdObj.command
+                if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "USER" -Source "DIAGNOSE" -Message "ACCEPT [$i] $($cmdObj.command)" } catch {} }
+                $result = Invoke-CMExecuteCommand -Command $cmdObj.command -Dispatch $dispatch
+                $cmdObj.Result = $result
+                $approved += $cmdObj
+                Write-Host ("  exit={0}  ({1}s)" -f $result.exitCode, $result.durationSec)
+                if ($result.exitCode -ne 0) {
+                    Write-CMWarn "  上一条命令失败（exit=$($result.exitCode)）"
+                }
+            } else {
+                if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "USER" -Source "DIAGNOSE" -Message "SKIP [$i] $($cmdObj.command)" } catch {} }
+            }
+        }
+    }
+
+    # 5) Report
+    Write-CMInfo "[4/4] 写入报告..."
+    $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved -Mode $mode
+    $reportDir = Join-Path $Script:CMRoot "reports"
+    if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
+    $safeApp = ($app -replace "[^A-Za-z0-9_-]", "_")
+    if ($safeApp.Length -gt 40) { $safeApp = $safeApp.Substring(0, 40) }
+    $file = Join-Path $reportDir ((Get-Date -Format "yyyy-MM-dd_HHmmss") + "_" + $safeApp + ".md")
+    $md | Set-Content -Path $file -Encoding UTF8
+    Write-CMSuccess "已保存：$file"
+}
+
+function Format-CMDiagnoseReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)]$Response,
+        [Parameter(Mandatory)][object[]]$Approved,
+        [string]$Mode = "quick"
+    )
+    $lines = @(
+        "# 应用安装诊断报告",
+        "",
+        "- 时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+        "- 模式：$Mode",
+        "- 应用：$($Context.app)",
+        "- 报错：$($Context.error)",
+        "- 已尝试：$($Context.tried)",
+        "",
+        "## 模型分析",
+        "- **结论**：$($Response.analysis)",
+        "- **根因**：$($Response.root_cause)",
+        "- **风险等级**：$($Response.risk_level)",
+        "",
+        "## 诊断快照",
+        ""
+    )
+    $lines += (Format-CMSnapshotMarkdown -Snapshot $Context.snapshot).Split("`n")
+    $lines += ""
+    $lines += "## 建议修复命令"
+    $lines += "| # | 风险 | 描述 | 命令 | 预期 | 实际退出码 | 耗时(s) |"
+    $lines += "|---|---|---|---|---|---|---|"
+    foreach ($a in $Approved) {
+        $lines += "| $($a.id) | $($a.risk) | $($a.description) | ``$($a.command)`` | $($a.expected_effect) | $($a.Result.exitCode) | $($a.Result.durationSec) |"
+    }
+    if ($Response.notes) {
+        $lines += ""
+        $lines += "## 备注"
+        $lines += $Response.notes
+    }
+    return ($lines -join "`n")
 }
 #endregion
 
@@ -1121,3 +1311,4 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 }
 #endregion
+
