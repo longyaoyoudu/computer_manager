@@ -518,19 +518,19 @@ function Invoke-CMExecuteCommand {
 
 #region LLM
 $Script:CMSystemPrompt = @'
+你是 Windows 系统管理员助手。你会收到一份"诊断快照"（系统只读信息）和用户描述的应用安装故障。
 
+任务：分析故障，给出可执行的、单行的 PowerShell / cmd / 原生命令来修复。
 
+约束（必须遵守）：
+1. 仅返回 submit_diagnosis 函数的 JSON 参数，不要其他文字。
+2. 命令必须是单行（不含换行符）。
+3. 禁止使用：Invoke-Expression、iex、-EncodedCommand、FromBase64String、cmd.exe /c 的多语句链接。
+4. 禁止破坏性操作：diskpart/format/clean、bcdedit 改引导、net user 添加账号、Set-MpPreference -ExclusionPath 大范围目录。
+5. 如果建议涉及用户数据/账号/引导修复，把 risk_level 设为 "high"。
+6. commands 数组最多 8 条；按"先无风险后高风险"排序。
 
-
-
-
-
-
-
-
-
-
-
+低风险示例：Get-Service / Start-Service / Set-Service、sfc /scannow、DISM /Online /Cleanup-Image、msiexec /unregister+register、Get-AppxPackage -Repair、Get-AppLockerPolicyInformation（只读）、注册表 HKLM 读+受限写。
 '@
 
 function Get-CMSubmitDiagnosisSchema {
@@ -649,7 +649,7 @@ function ConvertFrom-CMLLMResponse {
             if (-not $parsed -and $FallbackText) {
                 $parsed = [PSCustomObject]@{
                     analysis = $txt
-                    root_cause = "(model returned unstructured result)"
+                    root_cause = "(模型未返回结构化结果)"
                     risk_level = "unknown"
                     commands = @()
                 }
@@ -658,7 +658,7 @@ function ConvertFrom-CMLLMResponse {
     }
 
     if (-not $parsed) {
-        throw "Cannot parse LLM response: $($msg | Out-String)"
+        throw "无法解析 LLM 响应：$($msg | Out-String)"
     }
     return $parsed
 }
