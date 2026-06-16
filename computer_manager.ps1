@@ -733,11 +733,20 @@ function Invoke-CMDiagnose {
     }
 
     # 1) Snapshot
-    $mode = $Script:CMConfig.behavior.snapshot_mode
+    $mode = "quick"
+    if ($Script:CMConfig.PSObject.Properties.Name -contains "behavior" -and $Script:CMConfig.behavior.PSObject.Properties.Name -contains "snapshot_mode") {
+        $mode = $Script:CMConfig.behavior.snapshot_mode
+    }
     Write-CMInfo "[1/4] 收集诊断快照 (mode=$mode)..."
-    $snap = Get-CMSnapshot -Mode $mode
+    try {
+        $snap = Get-CMSnapshot -Mode $mode
+    } catch {
+        Write-CMError "快照收集失败：$($_.Exception.Message)"
+        if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "DIAGNOSE" -Message $_.ToString() } catch {} }
+        return
+    }
     $cmdMax = 2000
-    if ($Script:CMConfig.behavior.PSObject.Properties.Name -contains "max_command_length") {
+    if ($Script:CMConfig.PSObject.Properties.Name -contains "behavior" -and $Script:CMConfig.behavior.PSObject.Properties.Name -contains "max_command_length") {
         $cmdMax = [int]$Script:CMConfig.behavior.max_command_length
     }
 
@@ -791,12 +800,22 @@ function Invoke-CMDiagnose {
                 Result = $null
             }
             if ($cmdObj.command.Length -gt $cmdMax) {
-                Write-CMWarn "  [$i] 命令超过 $cmdMax 字符，需要 FORCE 确认"
-                $ok = Read-CMConfirm -Prompt "  输入 FORCE 以继续执行" -SimulateInput "FORCE"
-                if ($ok -ne $true) { continue }
+                Write-CMWarn "命令超过 $cmdMax 字符，需要输入 FORCE 确认"
+                $forceInput = (Read-Host "  输入 FORCE 以继续（其他跳过）").Trim()
+                if ($forceInput -ne "FORCE") {
+                    Write-CMWarn "  未输入 FORCE，已跳过"
+                    if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "USER" -Source "DIAGNOSE" -Message "SKIP-FORCE [$i] $($cmdObj.command)" } catch {} }
+                    continue
+                }
             }
             if ($effectiveRisk -eq "high") {
-                Write-CMError "  [!!] 高风险命令，需二次确认"
+                Write-CMError "[!!] 高风险命令，需输入 YES 二次确认"
+                $yesInput = (Read-Host "  输入 YES 继续（其他跳过）").Trim()
+                if ($yesInput -ne "YES") {
+                    Write-CMWarn "  未输入 YES，已跳过"
+                    if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "USER" -Source "DIAGNOSE" -Message "SKIP-HIGH-RISK [$i] $($cmdObj.command)" } catch {} }
+                    continue
+                }
             }
             $ok = Confirm-CMCommandRun -Cmd $cmdObj -Index $i -Total $resp.commands.Count
             if ($ok) {
@@ -822,6 +841,7 @@ function Invoke-CMDiagnose {
     if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
     $safeApp = ($app -replace "[^A-Za-z0-9_-]", "_")
     if ($safeApp.Length -gt 40) { $safeApp = $safeApp.Substring(0, 40) }
+    if ([string]::IsNullOrEmpty($safeApp)) { $safeApp = "unnamed" }
     $file = Join-Path $reportDir ((Get-Date -Format "yyyy-MM-dd_HHmmss") + "_" + $safeApp + ".md")
     $md | Set-Content -Path $file -Encoding UTF8
     Write-CMSuccess "已保存：$file"
@@ -832,9 +852,25 @@ function Format-CMDiagnoseReport {
     param(
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)]$Response,
-        [Parameter(Mandatory)][object[]]$Approved,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Approved,
         [string]$Mode = "quick"
     )
+    # StrictMode-safe property accessor for malformed LLM responses
+    function script:Get-CMRProp($obj, $name) {
+        if ($obj -is [hashtable]) {
+            if ($obj.ContainsKey($name)) { return $obj[$name] } else { return $null }
+        } elseif ($obj) {
+            $hit = $false
+            foreach ($p in $obj.PSObject.Properties) {
+                if ($p.Name -eq $name) { $hit = $true; break }
+            }
+            if ($hit) { return $obj.$name } else { return $null }
+        } else { return $null }
+    }
+    $analysis   = Get-CMRProp $Response 'analysis'
+    $rootCause  = Get-CMRProp $Response 'root_cause'
+    $riskLevel  = Get-CMRProp $Response 'risk_level'
+    $notes      = Get-CMRProp $Response 'notes'
     $lines = @(
         "# 应用安装诊断报告",
         "",
@@ -845,25 +881,28 @@ function Format-CMDiagnoseReport {
         "- 已尝试：$($Context.tried)",
         "",
         "## 模型分析",
-        "- **结论**：$($Response.analysis)",
-        "- **根因**：$($Response.root_cause)",
-        "- **风险等级**：$($Response.risk_level)",
+        "- **结论**：$analysis",
+        "- **根因**：$rootCause",
+        "- **风险等级**：$riskLevel",
         "",
         "## 诊断快照",
         ""
     )
-    $lines += (Format-CMSnapshotMarkdown -Snapshot $Context.snapshot).Split("`n")
+    $snapMd = Format-CMSnapshotMarkdown -Snapshot $Context.snapshot
+    if ($snapMd) { $lines += $snapMd.Split("`n") }
     $lines += ""
     $lines += "## 建议修复命令"
     $lines += "| # | 风险 | 描述 | 命令 | 预期 | 实际退出码 | 耗时(s) |"
     $lines += "|---|---|---|---|---|---|---|"
     foreach ($a in $Approved) {
-        $lines += "| $($a.id) | $($a.risk) | $($a.description) | ``$($a.command)`` | $($a.expected_effect) | $($a.Result.exitCode) | $($a.Result.durationSec) |"
+        $exitCode = if ($a.PSObject.Properties.Name -contains 'Result' -and $a.Result) { $a.Result.exitCode } else { '-' }
+        $duration = if ($a.PSObject.Properties.Name -contains 'Result' -and $a.Result) { $a.Result.durationSec } else { '-' }
+        $lines += "| $($a.id) | $($a.risk) | $($a.description) | ``$($a.command)`` | $($a.expected_effect) | $exitCode | $duration |"
     }
-    if ($Response.notes) {
+    if ($notes) {
         $lines += ""
         $lines += "## 备注"
-        $lines += $Response.notes
+        $lines += $notes
     }
     return ($lines -join "`n")
 }
