@@ -1,0 +1,27 @@
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$sut = (Resolve-Path "$here\..\computer_manager.ps1").Path
+. $sut
+
+Describe "Get-CMReportSummary" {
+    It "returns reports in directory sorted by time descending" {
+        $tmp = Join-Path $env:TEMP ("cm_rep_" + [Guid]::NewGuid().ToString("N"))
+        $repDir = Join-Path $tmp "reports"
+        New-Item -ItemType Directory -Path $repDir -Force | Out-Null
+        try {
+            "a" | Set-Content (Join-Path $repDir "2026-06-06_100000_x.md")
+            Start-Sleep -Milliseconds 1100
+            "b" | Set-Content (Join-Path $repDir "2026-06-06_100001_y.md")
+            $list = Get-CMReportSummary -RootPath $tmp
+            $list.Count | Should Be 2
+            $list[0].Name | Should Match "_y\.md$"
+        } finally {
+            Remove-Item -Recurse -Force $tmp
+        }
+    }
+
+    It "returns empty array when directory does not exist" {
+        $r = Get-CMReportSummary -RootPath "C:\does\not\exist_$([Guid]::NewGuid())"
+        $null -ne $r | Should Be $true
+        $r.Count | Should Be 0
+    }
+}

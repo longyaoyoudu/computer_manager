@@ -1231,6 +1231,29 @@ function Invoke-CMHealthSnapshot {
 #endregion
 
 #region Report
+function Get-CMReportSummary {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RootPath)
+    $dir = Join-Path $RootPath "reports"
+    if (-not (Test-Path $dir)) { return ,@() }
+    return ,@(Get-ChildItem $dir -Filter "*.md" | Sort-Object LastWriteTime -Descending)
+}
+
+function Invoke-CMReportRetention {
+    param([Parameter(Mandatory)][string]$RootPath, [int]$Days = 30)
+    $dir = Join-Path $RootPath "reports"
+    if (-not (Test-Path $dir)) { return }
+    $cutoff = (Get-Date).AddDays(-$Days)
+    Get-ChildItem $dir -Filter "*.md" | Where-Object { $_.LastWriteTime -lt $cutoff } | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-CMLogRetention {
+    param([Parameter(Mandatory)][string]$RootPath, [int]$Days = 30)
+    $dir = Join-Path $RootPath "logs"
+    if (-not (Test-Path $dir)) { return }
+    $cutoff = (Get-Date).AddDays(-$Days)
+    Get-ChildItem $dir -Filter "*.log" | Where-Object { $_.LastWriteTime -lt $cutoff } | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 #endregion
 
 #region Menu
@@ -1307,18 +1330,26 @@ function Show-CMSettingsMenu {
 }
 
 function Show-CMHistory {
-    Write-Host ""
-    Write-Host "--- 历史报告（最近 10 条）---" -ForegroundColor Cyan
-    $reportDir = Join-Path $Script:CMRoot "reports"
-    if (-not (Test-Path $reportDir)) {
-        Write-CMWarn "还没有报告。"
+    $list = Get-CMReportSummary -RootPath $Script:CMRoot
+    if ($list.Count -eq 0) {
+        Write-CMWarn '还还没有报告'
         return
     }
-    Get-ChildItem $reportDir -Filter "*.md" | Sort-Object LastWriteTime -Descending | Select -First 10 | ForEach-Object {
-        Write-Host ("  {0:yyyy-MM-dd HH:mm}  {1}" -f $_.LastWriteTime, $_.Name)
-    }
     Write-Host ""
-    Write-Host "（完整功能在任务 19）" -ForegroundColor Yellow
+    Write-Host '--- 历史报告 ---' -ForegroundColor Cyan
+    $i = 0
+    foreach ($f in $list) {
+        $i++
+        $size = Format-CMBytes $f.Length
+        Write-Host ("  {0,3}. {1:yyyy-MM-dd HH:mm}  {2,10}  {3}" -f $i, $f.LastWriteTime, $size, $f.Name)
+    }
+    Write-Host "  0. 返回主菜单"
+    $idx = Read-CMMenuChoice -Prompt "选择要查看的报告编号" -ValidChoices (@(0) + @(1..[Math]::Min($list.Count, 50)))
+    if ($idx -eq 0) { return }
+    $f = $list[$idx - 1]
+    Write-Host ""
+    Write-Host ("===== {0} =====" -f $f.Name) -ForegroundColor Cyan
+    Get-Content $f.FullName | Out-Host
 }
 
 function Show-CMAbout {
