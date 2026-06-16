@@ -581,7 +581,8 @@ function Invoke-CMLLMChat {
     param(
         [Parameter(Mandatory)][hashtable]$Config,
         [Parameter(Mandatory)][string]$UserMessage,
-        [int]$TimeoutSec = $Config.llm.timeout_seconds
+        [int]$TimeoutSec = $Config.llm.timeout_seconds,
+        [switch]$FallbackText
     )
     $baseUrl = $Config.llm.base_url.TrimEnd('/')
     $uri = "$baseUrl/chat/completions"
@@ -609,7 +610,7 @@ function Invoke-CMLLMChat {
         if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "LLM" -Message "HTTP 调用 失败: $($_.Exception.Message)" } catch {} }
         throw "LLM HTTP 调用失败：$($_.Exception.Message)"
     }
-    return ConvertFrom-CMLLMResponse -Raw $resp
+    return ConvertFrom-CMLLMResponse -Raw $resp -FallbackText:$FallbackText
 }
 
 function ConvertFrom-CMLLMResponse {
@@ -654,13 +655,30 @@ function ConvertFrom-CMLLMResponse {
     if (-not $parsed) {
         $txt = Get-CMSafeProp $msg 'content'
         if ($txt) {
-            $m = [Regex]::Match($txt, '(?s)```(?:json)?\s*(\{.*?\})\s*```')
-            $candidate = if ($m.Success) { $m.Groups[1].Value } else {
-                # 试: 截取首尾花括号
-                $i = $txt.IndexOf('{'); $j = $txt.LastIndexOf('}')
-                if ($i -ge 0 -and $j -gt $i) { $txt.Substring($i, $j - $i + 1) } else { $null }
+            # Strip reasoning blocks emitted by some models so they don't pollute JSON extraction.
+            $clean = [Regex]::Replace([string]$txt, '(?s)<think>.*?</think>', '')
+
+            $candidate = $null
+            $m = [Regex]::Match($clean, '(?s)```(?:json)?\s*(\{.*?\})\s*```')
+            if ($m.Success) {
+                $candidate = $m.Groups[1].Value
+            } else {
+                # Fallback: enumerate balanced top-level JSON-like substrings and try each
+                # until one parses. This is robust against stray braces in prose (PowerShell
+                # scriptblocks like `{$_.x}`) which would otherwise be picked as the "first"
+                # match by a naive IndexOf/LastIndexOf strategy.
+                $candidates = Get-CMAllBalancedJsonObjects -Text $clean
+                foreach ($cand in $candidates) {
+                    try {
+                        $parsed = $cand | ConvertFrom-Json -ErrorAction Stop
+                        $candidate = $cand
+                        break
+                    } catch {
+                        if (-not $parseError) { $parseError = "文本 内容 解析: $($_.Exception.Message)" }
+                    }
+                }
             }
-            if ($candidate) {
+            if ($candidate -and -not $parsed) {
                 try { $parsed = $candidate | ConvertFrom-Json -ErrorAction Stop } catch { if (-not $parseError) { $parseError = "文本 内容 解析: $($_.Exception.Message)" } }
             }
             if (-not $parsed -and $FallbackText) {
@@ -679,6 +697,52 @@ function ConvertFrom-CMLLMResponse {
         throw "无法解析 LLM 响应：$($msg | Out-String)$suffix"
     }
     return $parsed
+}
+
+# Enumerate every top-level balanced JSON-like substring in the text.
+# Robust against stray braces in prose (e.g. PowerShell scriptblocks like `{$_.x}`)
+# and braces inside JSON string values. Returns an array of matched substrings
+# in source order (may be empty). The caller is expected to try-parse each in
+# turn, since a balanced substring is not necessarily valid JSON.
+function Get-CMAllBalancedJsonObjects {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Text)
+
+    $results = New-Object System.Collections.Generic.List[string]
+    $depth = 0
+    $start = -1
+    $inString = $false
+    $escape = $false
+
+    for ($k = 0; $k -lt $Text.Length; $k++) {
+        $ch = $Text[$k]
+
+        if ($escape) {
+            $escape = $false
+            continue
+        }
+        if ($inString) {
+            if ($ch -eq '\') { $escape = $true }
+            elseif ($ch -eq '"') { $inString = $false }
+            continue
+        }
+
+        if ($ch -eq '"') {
+            $inString = $true
+        } elseif ($ch -eq '{') {
+            if ($depth -eq 0) { $start = $k }
+            $depth++
+        } elseif ($ch -eq '}') {
+            if ($depth -gt 0) {
+                $depth--
+                if ($depth -eq 0 -and $start -ge 0) {
+                    $results.Add($Text.Substring($start, $k - $start + 1))
+                    $start = -1
+                }
+            }
+        }
+    }
+    return ,$results.ToArray()
 }
 #endregion
 
@@ -774,7 +838,7 @@ function Invoke-CMDiagnose {
     Write-CMInfo "[3/4] 调用 LLM..."
     $safety = $Script:CMConfig.safety
     try {
-        $resp = Invoke-CMLLMChat -Config $Script:CMConfig -UserMessage $userMsg
+        $resp = Invoke-CMLLMChat -Config $Script:CMConfig -UserMessage $userMsg -FallbackText
     } catch {
         Write-CMError "LLM 调用失败：$($_.Exception.Message)"
         if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "LLM" -Message $_.ToString() } catch {} }
