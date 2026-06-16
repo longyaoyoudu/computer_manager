@@ -1332,7 +1332,7 @@ function Show-CMSettingsMenu {
 function Show-CMHistory {
     $list = Get-CMReportSummary -RootPath $Script:CMRoot
     if ($list.Count -eq 0) {
-        Write-CMWarn '还还没有报告'
+        Write-CMWarn '还没有报告'
         return
     }
     Write-Host ""
