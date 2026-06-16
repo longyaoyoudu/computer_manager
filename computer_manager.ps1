@@ -576,6 +576,40 @@ function Get-CMSubmitDiagnosisSchema {
     }
 }
 
+function Build-CMLLMRequestBody {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [Parameter(Mandatory)][string]$UserMessage
+    )
+    $body = @{
+        model       = $Config.llm.model
+        messages    = @(
+            @{ role = "system"; content = $Script:CMSystemPrompt }
+            @{ role = "user";   content = $UserMessage }
+        )
+        tools       = @(Get-CMSubmitDiagnosisSchema)
+        tool_choice = @{ type = "function"; function = @{ name = "submit_diagnosis" } }
+        temperature = $Config.llm.temperature
+        max_tokens  = $Config.llm.max_response_tokens
+    }
+    # Optional passthrough for vendor-specific knobs.
+    # MiniMax-M3 supports `thinking: {type: "disabled"}` to skip the <think> reasoning block.
+    # MiniMax-M2.x ignores it. Other OpenAI-compatible providers ignore unknown fields.
+    # Use ContainsKey for hashtables (PSObject.Properties.Name on a hashtable returns
+    # type metadata like Keys/Count, not its own key-value pairs).
+    $hasThinking = $false
+    if ($Config.llm -is [hashtable]) {
+        $hasThinking = $Config.llm.ContainsKey('thinking')
+    } else {
+        $hasThinking = $Config.llm.PSObject.Properties.Name -contains 'thinking'
+    }
+    if ($hasThinking -and $Config.llm.thinking) {
+        $body.thinking = $Config.llm.thinking
+    }
+    return $body | ConvertTo-Json -Depth 20
+}
+
 function Invoke-CMLLMChat {
     [CmdletBinding()]
     param(
@@ -587,17 +621,7 @@ function Invoke-CMLLMChat {
     $baseUrl = $Config.llm.base_url.TrimEnd('/')
     $uri = "$baseUrl/chat/completions"
 
-    $body = @{
-        model = $Config.llm.model
-        messages = @(
-            @{ role = "system"; content = $Script:CMSystemPrompt }
-            @{ role = "user";   content = $UserMessage }
-        )
-        tools = @(Get-CMSubmitDiagnosisSchema)
-        tool_choice = @{ type = "function"; function = @{ name = "submit_diagnosis" } }
-        temperature = $Config.llm.temperature
-        max_tokens = $Config.llm.max_response_tokens
-    } | ConvertTo-Json -Depth 20
+    $body = Build-CMLLMRequestBody -Config $Config -UserMessage $UserMessage
 
     $headers = @{
         "Authorization" = "Bearer $($Config.llm.api_key)"

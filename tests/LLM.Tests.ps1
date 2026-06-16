@@ -2,6 +2,64 @@
 $sut = (Resolve-Path "$here\..\computer_manager.ps1").Path
 . $sut
 
+Describe "Build-CMLLMRequestBody" {
+    It 'should include thinking=disabled when configured (MiniMax-M3)' {
+        $cfg = @{
+            llm = @{
+                base_url = 'https://api.minimaxi.com/v1'
+                api_key = 'sk-test'
+                model = 'MiniMax-M3'
+                temperature = 0.2
+                timeout_seconds = 60
+                max_response_tokens = 2000
+                thinking = @{ type = 'disabled' }
+            }
+        }
+        $body = Build-CMLLMRequestBody -Config $cfg -UserMessage 'hello'
+        $obj = $body | ConvertFrom-Json
+        $obj.thinking.type | Should Be 'disabled'
+        $obj.model | Should Be 'MiniMax-M3'
+        $obj.tool_choice.function.name | Should Be 'submit_diagnosis'
+        $obj.messages.Count | Should Be 2
+        $obj.messages[0].role | Should Be 'system'
+        $obj.messages[1].role | Should Be 'user'
+    }
+
+    It 'should include thinking=adaptive when configured' {
+        $cfg = @{
+            llm = @{
+                base_url = 'https://api.minimaxi.com/v1'
+                api_key = 'sk-test'
+                model = 'MiniMax-M3'
+                temperature = 0.2
+                timeout_seconds = 60
+                max_response_tokens = 2000
+                thinking = @{ type = 'adaptive' }
+            }
+        }
+        $body = Build-CMLLMRequestBody -Config $cfg -UserMessage 'hi'
+        ($body | ConvertFrom-Json).thinking.type | Should Be 'adaptive'
+    }
+
+    It 'should omit thinking field when not configured (backward compat)' {
+        $cfg = @{
+            llm = @{
+                base_url = 'https://api.openai.com/v1'
+                api_key = 'sk-test'
+                model = 'gpt-4o-mini'
+                temperature = 0.2
+                timeout_seconds = 60
+                max_response_tokens = 2000
+            }
+        }
+        $body = Build-CMLLMRequestBody -Config $cfg -UserMessage 'hi'
+        $obj = $body | ConvertFrom-Json
+        # Use -contains + Should Be instead of Pester 3.4's Should Not Contain, which
+        # misroutes array operands through its file-containment path.
+        ($obj.PSObject.Properties.Name -contains 'thinking') | Should Be $false
+    }
+}
+
 Describe "ConvertFrom-CMLLMResponse (tool_calls)" {
     It 'should parse tool_calls form' {
         $raw = @{
