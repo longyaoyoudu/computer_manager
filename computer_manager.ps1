@@ -246,6 +246,15 @@ function Initialize-CM {
     }
     $Script:CMLogger = New-CMLogger -RootPath $Script:CMRoot
     Write-CMLog -Logger $Script:CMLogger -Level "INFO" -Source "INIT" -Message "computer_manager.ps1 启动，版本 $Script:CMVersion"
+    # 启动时清理过期日志/报告
+    try {
+        $logDays   = if ($Script:CMConfig.behavior.log_retention_days)   { [int]$Script:CMConfig.behavior.log_retention_days }   else { 30 }
+        $reportDays = if ($Script:CMConfig.behavior.report_retention_days) { [int]$Script:CMConfig.behavior.report_retention_days } else { 90 }
+        Invoke-CMLogRetention    -RootPath $Script:CMRoot -Days $logDays
+        Invoke-CMReportRetention -RootPath $Script:CMRoot -Days $reportDays
+    } catch {
+        Write-CMWarn "保留期期清理失败：$($_.Exception.Message)"
+    }
     return $true
 }
 #endregion
