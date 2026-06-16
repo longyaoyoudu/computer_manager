@@ -1240,19 +1240,33 @@ function Get-CMReportSummary {
 }
 
 function Invoke-CMReportRetention {
+    [CmdletBinding()]
     param([Parameter(Mandatory)][string]$RootPath, [int]$Days = 30)
     $dir = Join-Path $RootPath "reports"
     if (-not (Test-Path $dir)) { return }
     $cutoff = (Get-Date).AddDays(-$Days)
-    Get-ChildItem $dir -Filter "*.md" | Where-Object { $_.LastWriteTime -lt $cutoff } | Remove-Item -Force -ErrorAction SilentlyContinue
+    $stale = @(Get-ChildItem $dir -Filter "*.md" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })
+    if ($stale.Count -gt 0) {
+        $stale | Remove-Item -Force -ErrorAction SilentlyContinue
+        if ($Script:CMLogger) {
+            try { Write-CMLog -Logger $Script:CMLogger -Level 'INFO' -Source 'RETAIN' -Message ("已删除 {0} 份过期报告 (>{1}天)" -f $stale.Count, $Days) } catch {}
+        }
+    }
 }
 
 function Invoke-CMLogRetention {
+    [CmdletBinding()]
     param([Parameter(Mandatory)][string]$RootPath, [int]$Days = 30)
     $dir = Join-Path $RootPath "logs"
     if (-not (Test-Path $dir)) { return }
     $cutoff = (Get-Date).AddDays(-$Days)
-    Get-ChildItem $dir -Filter "*.log" | Where-Object { $_.LastWriteTime -lt $cutoff } | Remove-Item -Force -ErrorAction SilentlyContinue
+    $stale = @(Get-ChildItem $dir -Filter "*.log" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })
+    if ($stale.Count -gt 0) {
+        $stale | Remove-Item -Force -ErrorAction SilentlyContinue
+        if ($Script:CMLogger) {
+            try { Write-CMLog -Logger $Script:CMLogger -Level 'INFO' -Source 'RETAIN' -Message ("已删除 {0} 份过期日志 (>{1}天)" -f $stale.Count, $Days) } catch {}
+        }
+    }
 }
 #endregion
 
