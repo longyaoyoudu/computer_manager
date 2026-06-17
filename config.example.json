@@ -5,7 +5,8 @@
     "model": "gpt-4o-mini",
     "temperature": 0.2,
     "timeout_seconds": 60,
-    "max_response_tokens": 2000
+    "max_response_tokens": 2000,
+    "thinking": { "type": "disabled" }
   },
   "ui": {
     "language": "zh-CN",

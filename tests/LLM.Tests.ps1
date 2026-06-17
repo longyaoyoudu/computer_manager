@@ -210,3 +210,69 @@ Trailing text with `}` braces.
         $r.analysis | Should Be 'with } inside string'
     }
 }
+
+Describe "Test-CMLLMResponseThinkingOnly" {
+    It 'returns true when content is only <think> block' {
+        $raw = @{ choices = @(@{
+            message = @{ content = '<think>model thought for a while but never produced output</think>' }
+        }) }
+        Test-CMLLMResponseThinkingOnly -Raw $raw | Should Be $true
+    }
+
+    It 'returns true when content is empty and no tool_calls' {
+        $raw = @{ choices = @(@{
+            message = @{ content = '' }
+        }) }
+        Test-CMLLMResponseThinkingOnly -Raw $raw | Should Be $true
+    }
+
+    It 'returns false when tool_calls is present' {
+        $raw = @{ choices = @(@{
+            message = @{
+                content = '<think>ignored when tool_calls present</think>'
+                tool_calls = @(@{ function = @{ name = 'submit_diagnosis'; arguments = '{}' } })
+            }
+        }) }
+        Test-CMLLMResponseThinkingOnly -Raw $raw | Should Be $false
+    }
+
+    It 'returns false when content has prose after <think>' {
+        $raw = @{ choices = @(@{
+            message = @{ content = "<think>reasoning</think>Real answer here." }
+        }) }
+        Test-CMLLMResponseThinkingOnly -Raw $raw | Should Be $false
+    }
+
+    It 'returns false when choices is missing' {
+        $raw = @{ error = 'rate limited' }
+        Test-CMLLMResponseThinkingOnly -Raw $raw | Should Be $false
+    }
+}
+
+Describe "ConvertFrom-CMLLMResponse (FallbackText strips <think>)" {
+    It 'should strip <think> block from analysis when prose follows' {
+        $content = "<think>this was the model thinking</think>User-facing answer."
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.analysis | Should Be 'User-facing answer.'
+        ($r.analysis -notmatch '<think>') | Should Be $true
+        $r.risk_level | Should Be 'unknown'
+    }
+
+    It 'should preserve prose around <think> when FallbackText triggers' {
+        $content = "<think>reasoning</think>User-facing answer here."
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.analysis | Should Be 'User-facing answer here.'
+    }
+
+    It 'should fall back to original text when stripping leaves nothing' {
+        $content = '<think>only thinking, no prose, no JSON, no tool_calls</think>'
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        # Stripping <think> leaves nothing; we keep the original text so the user sees SOMETHING
+        # rather than a blank field. Better UX than silent emptiness.
+        $r.analysis | Should Be $content
+        $r.risk_level | Should Be 'unknown'
+    }
+}

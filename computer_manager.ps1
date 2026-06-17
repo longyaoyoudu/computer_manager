@@ -576,6 +576,21 @@ function Get-CMSubmitDiagnosisSchema {
     }
 }
 
+# StrictMode-safe property accessor shared across LLM helpers.
+# hashtable uses ContainsKey; PSObject uses Properties.Name.
+function Get-CMSafeProp {
+    [CmdletBinding()]
+    param($obj, [Parameter(Mandatory)][string]$name)
+    if ($obj -is [hashtable]) {
+        if ($obj.ContainsKey($name)) { return $obj[$name] } else { return $null }
+    } elseif ($obj) {
+        $names = $obj.PSObject.Properties.Name
+        if ($names -contains $name) { return $obj.$name } else { return $null }
+    } else {
+        return $null
+    }
+}
+
 function Build-CMLLMRequestBody {
     [CmdletBinding()]
     param(
@@ -610,30 +625,67 @@ function Build-CMLLMRequestBody {
     return $body | ConvertTo-Json -Depth 20
 }
 
+# Detect the "model thought but never produced output" failure mode.
+# Returns $true when the response has no tool_calls and the content is empty
+# or only contains a <think>...</think> block. The caller should retry with a
+# hint in such cases.
+function Test-CMLLMResponseThinkingOnly {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Raw)
+
+    $choices = Get-CMSafeProp $Raw 'choices'
+    $firstChoice = if ($choices -is [System.Collections.IList] -and $choices.Count -gt 0) { $choices[0] } elseif ($choices) { $choices } else { $null }
+    $msg = if ($firstChoice) { Get-CMSafeProp $firstChoice 'message' } else { $null }
+    if (-not $msg) { return $false }
+
+    # Any tool_calls means the model emitted structured output - not thinking-only.
+    if (Get-CMSafeProp $msg 'tool_calls') { return $false }
+
+    $content = Get-CMSafeProp $msg 'content'
+    if (-not $content) { return $true }
+
+    $stripped = [Regex]::Replace([string]$content, '(?s)<think>.*?</think>', '').Trim()
+    return [string]::IsNullOrWhiteSpace($stripped)
+}
+
 function Invoke-CMLLMChat {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][hashtable]$Config,
         [Parameter(Mandatory)][string]$UserMessage,
         [int]$TimeoutSec = $Config.llm.timeout_seconds,
-        [switch]$FallbackText
+        [switch]$FallbackText,
+        [int]$MaxRetries = 1
     )
     $baseUrl = $Config.llm.base_url.TrimEnd('/')
     $uri = "$baseUrl/chat/completions"
-
-    $body = Build-CMLLMRequestBody -Config $Config -UserMessage $UserMessage
 
     $headers = @{
         "Authorization" = "Bearer $($Config.llm.api_key)"
         "Content-Type"  = "application/json"
     }
 
-    try {
-        $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -TimeoutSec $TimeoutSec -ErrorAction Stop
-    } catch {
-        if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "LLM" -Message "HTTP 调用 失败: $($_.Exception.Message)" } catch {} }
-        throw "LLM HTTP 调用失败：$($_.Exception.Message)"
+    $currentMessage = $UserMessage
+    $resp = $null
+    for ($attempt = 1; $attempt -le ($MaxRetries + 1); $attempt++) {
+        $body = Build-CMLLMRequestBody -Config $Config -UserMessage $currentMessage
+        try {
+            $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body -TimeoutSec $TimeoutSec -ErrorAction Stop
+        } catch {
+            if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "ERR" -Source "LLM" -Message "HTTP 调用 失败: $($_.Exception.Message)" } catch {} }
+            throw "LLM HTTP 调用失败：$($_.Exception.Message)"
+        }
+
+        if ($attempt -le $MaxRetries -and (Test-CMLLMResponseThinkingOnly -Raw $resp)) {
+            if ($Script:CMLogger) { try { Write-CMLog -Logger $Script:CMLogger -Level "WARN" -Source "LLM" -Message "第 $attempt 次响应只有 <think> 无结构化输出，追加 hint 重试" } catch {} }
+            $currentMessage = "$UserMessage`n`n[系统重试提示] 你刚才只输出了 <think> 思考块却没有调用 submit_diagnosis 函数。本轮请直接调用 submit_diagnosis 函数提交结构化结果（analysis / root_cause / risk_level / commands），不要再输出 <think>。"
+            continue
+        }
+
+        return ConvertFrom-CMLLMResponse -Raw $resp -FallbackText:$FallbackText
     }
+
+    # Unreachable in practice, but keeps the linter happy if control flow analysis misses the return above.
     return ConvertFrom-CMLLMResponse -Raw $resp -FallbackText:$FallbackText
 }
 
@@ -643,17 +695,6 @@ function ConvertFrom-CMLLMResponse {
         [Parameter(Mandatory)]$Raw,
         [switch]$FallbackText
     )
-    # StrictMode-safe property accessor: hashtable uses ContainsKey, PSObject uses Properties.Name
-    function script:Get-CMSafeProp($obj, $name) {
-        if ($obj -is [hashtable]) {
-            if ($obj.ContainsKey($name)) { return $obj[$name] } else { return $null }
-        } elseif ($obj) {
-            $names = $obj.PSObject.Properties.Name
-            if ($names -contains $name) { return $obj.$name } else { return $null }
-        } else {
-            return $null
-        }
-    }
 
     $choices = Get-CMSafeProp $Raw 'choices'
     $firstChoice = if ($choices -is [System.Collections.IList] -and $choices.Count -gt 0) { $choices[0] } elseif ($choices) { $choices } else { $null }
@@ -686,7 +727,7 @@ function ConvertFrom-CMLLMResponse {
             $m = [Regex]::Match($clean, '(?s)```(?:json)?\s*(\{.*?\})\s*```')
             if ($m.Success) {
                 $candidate = $m.Groups[1].Value
-            } else {
+            } elseif ($clean) {
                 # Fallback: enumerate balanced top-level JSON-like substrings and try each
                 # until one parses. This is robust against stray braces in prose (PowerShell
                 # scriptblocks like `{$_.x}`) which would otherwise be picked as the "first"
@@ -706,8 +747,13 @@ function ConvertFrom-CMLLMResponse {
                 try { $parsed = $candidate | ConvertFrom-Json -ErrorAction Stop } catch { if (-not $parseError) { $parseError = "文本 内容 解析: $($_.Exception.Message)" } }
             }
             if (-not $parsed -and $FallbackText) {
+                # Strip any <think>...</think> blocks so the user sees clean text rather
+                # than a wall of model reasoning. Fall back to the original text if
+                # stripping leaves nothing useful.
+                $displayText = [Regex]::Replace([string]$txt, '(?s)<think>.*?</think>', '').Trim()
+                if ([string]::IsNullOrWhiteSpace($displayText)) { $displayText = $txt }
                 $parsed = [PSCustomObject]@{
-                    analysis = $txt
+                    analysis = $displayText
                     root_cause = "（模型未返回结构化结果）"
                     risk_level = "unknown"
                     commands = @()
@@ -730,7 +776,7 @@ function ConvertFrom-CMLLMResponse {
 # turn, since a balanced substring is not necessarily valid JSON.
 function Get-CMAllBalancedJsonObjects {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Text)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
 
     $results = New-Object System.Collections.Generic.List[string]
     $depth = 0
