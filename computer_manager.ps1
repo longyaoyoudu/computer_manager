@@ -1027,8 +1027,6 @@ function Format-CMDiagnoseReport {
         "- **结论**：$analysis",
         "- **根因**：$rootCause",
         "- **风险等级**：$riskLevel",
-        "",
-        "## 诊断快照",
         ""
     )
     $snapMd = Format-CMSnapshotMarkdown -Snapshot $Context.snapshot
@@ -1041,6 +1039,27 @@ function Format-CMDiagnoseReport {
         $exitCode = if ($a.PSObject.Properties.Name -contains 'Result' -and $a.Result) { $a.Result.exitCode } else { '-' }
         $duration = if ($a.PSObject.Properties.Name -contains 'Result' -and $a.Result) { $a.Result.durationSec } else { '-' }
         $lines += "| $($a.id) | $($a.risk) | $($a.description) | ``$($a.command)`` | $($a.expected_effect) | $exitCode | $duration |"
+    }
+    # Show LLM-suggested commands the user did not approve, so they are not
+    # silently lost when the interactive prompt was skipped or declined.
+    $approvedIds = New-Object System.Collections.Generic.HashSet[int]
+    foreach ($a in $Approved) { [void]$approvedIds.Add([int]$a.id) }
+    $pending = @()
+    foreach ($c in (Get-CMRProp $Response 'commands')) {
+        if (-not $approvedIds.Contains([int]$c.id)) { $pending += $c }
+    }
+    if ($pending.Count -gt 0) {
+        $lines += ""
+        $lines += "### 建议但未执行"
+        $lines += "| # | 风险 | 描述 | 命令 | 预期 |"
+        $lines += "|---|---|---|---|---|"
+        foreach ($c in $pending) {
+            $cRisk = Get-CMRProp $c 'risk'
+            $cDesc = Get-CMRProp $c 'description'
+            $cCmd  = Get-CMRProp $c 'command'
+            $cEff  = Get-CMRProp $c 'expected_effect'
+            $lines += "| $([int](Get-CMRProp $c 'id')) | $cRisk | $cDesc | ``$cCmd`` | $cEff |"
+        }
     }
     if ($notes) {
         $lines += ""
