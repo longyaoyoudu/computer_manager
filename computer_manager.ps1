@@ -538,6 +538,7 @@ $Script:CMSystemPrompt = @'
 4. 禁止破坏性操作：diskpart/format/clean、bcdedit 改引导、net user 添加账号、Set-MpPreference -ExclusionPath 大范围目录。
 5. 如果建议涉及用户数据/账号/引导修复，把 risk_level 设为 "high"。
 6. commands 数组最多 8 条；按"先无风险后高风险"排序。
+7. 每条命令的 risk 字段必须填（low/medium/high），用于报告风险列展示。
 
 低风险示例：Get-Service / Start-Service / Set-Service、sfc /scannow、DISM /Online /Cleanup-Image、msiexec /unregister+register、Get-AppxPackage -Repair、Get-AppLockerPolicyInformation（只读）、注册表 HKLM 读+受限写。
 '@
@@ -564,6 +565,7 @@ function Get-CMSubmitDiagnosisSchema {
                                 command = @{ type = "string"; description = "单行命令" }
                                 expected_effect = @{ type = "string" }
                                 rollback_hint = @{ type = "string" }
+                                risk = @{ type = "string"; enum = @("low","medium","high"); description = "单条命令的本地风险，缺失时由 Parser 兜底" }
                             }
                             required = @("id","description","command")
                         }
@@ -1015,7 +1017,7 @@ function Invoke-CMDiagnose {
 
     # 5) Report
     Write-CMInfo "[4/4] 写入报告..."
-    $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved -Mode $mode
+    $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved -Mode $mode -SafetyConfig $safety
     $reportDir = Join-Path $Script:CMRoot "reports"
     if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir -Force | Out-Null }
     $safeApp = ($app -replace "[^A-Za-z0-9_-]", "_")
@@ -1032,7 +1034,8 @@ function Format-CMDiagnoseReport {
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)]$Response,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Approved,
-        [string]$Mode = "quick"
+        [string]$Mode = "quick",
+        $SafetyConfig
     )
     # StrictMode-safe property accessor for malformed LLM responses
     function script:Get-CMRProp($obj, $name) {
@@ -1091,10 +1094,26 @@ function Format-CMDiagnoseReport {
         $lines += "|---|---|---|---|---|"
         foreach ($c in $pending) {
             $cRisk = Get-CMRProp $c 'risk'
+            if ([string]::IsNullOrWhiteSpace($cRisk)) { $cRisk = '-' }
             $cDesc = Get-CMRProp $c 'description'
             $cCmd  = Get-CMRProp $c 'command'
             $cEff  = Get-CMRProp $c 'expected_effect'
-            $lines += "| $([int](Get-CMRProp $c 'id')) | $cRisk | $cDesc | ``$cCmd`` | $cEff |"
+            # Validate the command through the same Parser used during interactive
+            # execution, so the report doesn't suggest commands that the script
+            # would reject at runtime.
+            $cId = [int](Get-CMRProp $c 'id')
+            if ($SafetyConfig -and $cCmd) {
+                $safetyCheck = Test-CMCommandAllowed -Command ([string]$cCmd) -SafetyConfig $SafetyConfig
+                if (-not $safetyCheck.allowed) {
+                    $cRisk = "rejected"
+                    $cDesc = "$cDesc （被解析防护拒绝：$($safetyCheck.reason)）"
+                } elseif ($cRisk -eq '-') {
+                    # Fall back to the Parser's effective risk so the report has a
+                    # meaningful value even when the LLM omitted the field.
+                    $cRisk = $safetyCheck.risk
+                }
+            }
+            $lines += "| $cId | $cRisk | $cDesc | ``$cCmd`` | $cEff |"
         }
     }
     if ($notes) {

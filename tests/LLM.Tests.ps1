@@ -23,6 +23,8 @@ Describe "Build-CMLLMRequestBody" {
         $obj.messages.Count | Should Be 2
         $obj.messages[0].role | Should Be 'system'
         $obj.messages[1].role | Should Be 'user'
+        # Schema exposes optional risk field on each command (used for the pending table)
+        ($obj.tools[0].function.parameters.properties.commands.items.properties | Get-Member -Name risk -ErrorAction SilentlyContinue) | Should Not BeNullOrEmpty
     }
 
     It 'should include thinking=adaptive when configured' {
