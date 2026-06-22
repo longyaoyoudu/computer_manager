@@ -369,14 +369,53 @@ function Format-CMSnapshotMarkdown {
     $lines = @("## 诊断快照", "")
     $lines += "| 字段 | 值 |"
     $lines += "|---|---|"
+    $objectArrays = @()
     foreach ($p in $Snapshot.PSObject.Properties) {
         $val = $p.Value
+        # Detect arrays of objects (e.g. event_log_errors). PSCustomObject.ToString()
+        # returns an empty string, so the naive "join ToString" path produces "; ; ; ;"
+        # for these — we render them as a sub-table appended below the main table.
         if ($val -is [System.Collections.IEnumerable] -and -not ($val -is [string])) {
-            $val = ($val | ForEach-Object { $_.ToString() }) -join "; "
+            $arr = @($val)
+            $isObjectArr = $false
+            if ($arr.Count -gt 0 -and $arr[0] -is [PSCustomObject]) { $isObjectArr = $true }
+            if ($isObjectArr) {
+                $objectArrays += [PSCustomObject]@{ Name = $p.Name; Items = $arr }
+                $lines += "| $($p.Name) | ($($arr.Count) 条，见下表) |"
+                continue
+            }
+            if ($arr.Count -eq 0) {
+                $lines += "| $($p.Name) | (无) |"
+                continue
+            }
+            $val = ($arr | ForEach-Object { "$_" }) -join "; "
         }
         $valStr = if ($null -eq $val) { "(空)" } else { ($val | Out-String).Trim() }
         if ($valStr.Length -gt 200) { $valStr = $valStr.Substring(0, 200) + "..." }
         $lines += "| $($p.Name) | $valStr |"
+    }
+    foreach ($oa in $objectArrays) {
+        $lines += ""
+        $lines += "### $($oa.Name)"
+        $first = $oa.Items[0]
+        $colNames = @($first.PSObject.Properties | ForEach-Object { $_.Name })
+        $header = "| " + ($colNames -join " | ") + " |"
+        $sep = "| " + (($colNames | ForEach-Object { "---" }) -join " | ") + " |"
+        $lines += $header
+        $lines += $sep
+        foreach ($item in $oa.Items) {
+            $cells = foreach ($c in $colNames) {
+                $v = $item.$c
+                if ($null -eq $v) { "" }
+                elseif ($v -is [System.Collections.IEnumerable] -and -not ($v -is [string])) { (@($v) | ForEach-Object { "$_" }) -join "; " }
+                else { ($v | Out-String).Trim() }
+            }
+            # Truncate each cell so a chatty event message can't blow up the row
+            $cells = $cells | ForEach-Object { if ($_.Length -gt 120) { $_.Substring(0, 120) + "..." } else { $_ } }
+            # Escape pipes inside cells so the table stays well-formed
+            $cells = $cells | ForEach-Object { $_ -replace '\|', '\|' }
+            $lines += "| " + ($cells -join " | ") + " |"
+        }
     }
     return ($lines -join "`n")
 }
