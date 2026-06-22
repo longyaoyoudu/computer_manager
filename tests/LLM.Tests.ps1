@@ -23,6 +23,8 @@ Describe "Build-CMLLMRequestBody" {
         $obj.messages.Count | Should Be 2
         $obj.messages[0].role | Should Be 'system'
         $obj.messages[1].role | Should Be 'user'
+        # Schema exposes optional risk field on each command (used for the pending table)
+        ($obj.tools[0].function.parameters.properties.commands.items.properties | Get-Member -Name risk -ErrorAction SilentlyContinue) | Should Not BeNullOrEmpty
     }
 
     It 'should include thinking=adaptive when configured' {
@@ -274,5 +276,79 @@ Describe "ConvertFrom-CMLLMResponse (FallbackText strips <think>)" {
         # rather than a blank field. Better UX than silent emptiness.
         $r.analysis | Should Be $content
         $r.risk_level | Should Be 'unknown'
+    }
+}
+
+Describe "ConvertFrom-CMLLMResponse (FallbackText heuristic extraction)" {
+    # When the model returns markdown prose instead of calling submit_diagnosis,
+    # we salvage root_cause and risk_level via regex so the report still has
+    # real structured fields rather than placeholders.
+
+    It 'extracts root_cause from **根因定位：** marker' {
+        $content = "## Analysis`n**核心症状**：`n1. MSI stopped`n**根因定位：**`nMSI Installer stopped + disk low, causing 0xFFFFFFFF."
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.root_cause | Should Match 'MSI Installer stopped'
+        $r.root_cause | Should Not Match '模型未返回结构化结果'
+    }
+
+    It 'extracts root_cause from **根因：** marker' {
+        $content = "**根因：**服务依赖损坏导致 MSI 无法启动。"
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.root_cause | Should Match '服务依赖损坏'
+    }
+
+    It 'extracts root_cause from English Root cause: marker' {
+        $content = "Analysis complete.`nRoot cause: Windows Installer service is stopped."
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.root_cause | Should Match 'Windows Installer service is stopped'
+    }
+
+    It 'extracts risk_level from 高风险 keyword' {
+        $content = "该操作属于高风险命令，需要管理员权限。"
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.risk_level | Should Be 'high'
+    }
+
+    It 'extracts risk_level from 中风险 / 低风险 keywords' {
+        $raw1 = @{ choices = @(@{ message = @{ content = "这是中风险操作。" } }) }
+        (ConvertFrom-CMLLMResponse -Raw $raw1 -FallbackText).risk_level | Should Be 'medium'
+
+        $raw2 = @{ choices = @(@{ message = @{ content = "低风险只读操作。" } }) }
+        (ConvertFrom-CMLLMResponse -Raw $raw2 -FallbackText).risk_level | Should Be 'low'
+    }
+
+    It 'extracts risk_level from English high/medium/low keywords' {
+        $raw1 = @{ choices = @(@{ message = @{ content = "Risk: high - may damage data." } }) }
+        (ConvertFrom-CMLLMResponse -Raw $raw1 -FallbackText).risk_level | Should Be 'high'
+
+        $raw2 = @{ choices = @(@{ message = @{ content = "Severity: medium impact." } }) }
+        (ConvertFrom-CMLLMResponse -Raw $raw2 -FallbackText).risk_level | Should Be 'medium'
+    }
+
+    It 'keeps placeholder when no root_cause marker exists' {
+        $content = "Some analysis with no structured markers."
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.root_cause | Should Match '模型未返回结构化结果'
+    }
+
+    It 'keeps risk_level=unknown when no risk keyword exists' {
+        $content = "Some analysis text without any risk indicators."
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        $r.risk_level | Should Be 'unknown'
+    }
+
+    It 'combines <think> strip + heuristic extraction in one response' {
+        $content = "<think>reasoning about MSI service</think>**根因定位：**`nMSI service stopped.`n风险等级：高风险"
+        $raw = @{ choices = @(@{ message = @{ content = $content } }) }
+        $r = ConvertFrom-CMLLMResponse -Raw $raw -FallbackText
+        ($r.analysis -notmatch '<think>') | Should Be $true
+        $r.root_cause | Should Match 'MSI service stopped'
+        $r.risk_level | Should Be 'high'
     }
 }

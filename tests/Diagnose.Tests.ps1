@@ -139,4 +139,54 @@ Describe "Format-CMDiagnoseReport" {
         $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved
         $md | Should Not Match '建议但未执行'
     }
+
+    It "should annotate pending commands that fail Parser safety check" {
+        $ctx = [PSCustomObject]@{ snapshot = [PSCustomObject]@{}; app = "X"; error = "E"; tried = "" }
+        $resp = [PSCustomObject]@{
+            commands = @(
+                [PSCustomObject]@{ id = 1; risk = "low"; description = "safe"; command = "Get-Service x"; expected_effect = "ok" },
+                # iex is rejected by Parser unless allow_iex=true
+                [PSCustomObject]@{ id = 2; risk = "low"; description = "unsafe iex"; command = "Invoke-Expression 'Get-Process'"; expected_effect = "nope" }
+            )
+        }
+        $approved = @()
+        $safety = @{ allow_encoded_commands = $false; allow_iex = $false }
+        $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved -SafetyConfig $safety
+        # The unsafe command should be marked rejected with reason
+        $md | Should Match 'rejected'
+        $md | Should Match '被解析防护拒绝'
+        # The safe command should still appear without rejected annotation
+        $md | Should Match 'Get-Service x'
+    }
+
+    It "should fall back to '-' for pending risk when LLM omitted it" {
+        $ctx = [PSCustomObject]@{ snapshot = [PSCustomObject]@{}; app = "X"; error = "E"; tried = "" }
+        $resp = [PSCustomObject]@{
+            commands = @(
+                [PSCustomObject]@{ id = 1; description = "no risk field"; command = "Get-Service x"; expected_effect = "ok" }
+            )
+        }
+        $approved = @()
+        # Without SafetyConfig, risk defaults to '-'
+        $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved
+        # Find the pending row for id=1 and check its risk column
+        $pendingSection = ($md -split '### 建议但未执行', 2)[1]
+        $pendingSection | Should Match '\| 1 \| - \|'
+    }
+
+    It "should use Parser effective risk when LLM omitted risk and SafetyConfig provided" {
+        $ctx = [PSCustomObject]@{ snapshot = [PSCustomObject]@{}; app = "X"; error = "E"; tried = "" }
+        $resp = [PSCustomObject]@{
+            commands = @(
+                [PSCustomObject]@{ id = 1; description = "no risk"; command = "Get-Service x"; expected_effect = "ok" }
+            )
+        }
+        $approved = @()
+        $safety = @{ allow_encoded_commands = $false; allow_iex = $false }
+        $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved -SafetyConfig $safety
+        $pendingSection = ($md -split '### 建议但未执行', 2)[1]
+        # Parser default risk for Get-Service is low; risk column should NOT be '-'
+        $pendingSection | Should Not Match '\| 1 \| - \|'
+        $pendingSection | Should Match '\| 1 \| low \|'
+    }
 }
