@@ -87,4 +87,56 @@ Describe "Format-CMDiagnoseReport" {
         $md | Should Match '## '
         # Should not throw and should produce a report (analysis/root_cause/risk_level are empty)
     }
+
+    It "should not duplicate the 诊断快照 header" {
+        $ctx = [PSCustomObject]@{ snapshot = [PSCustomObject]@{ os = "Win11" }; app = "X"; error = "E"; tried = "" }
+        $resp = [PSCustomObject]@{ commands = @() }
+        $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved @()
+        # Count occurrences of the snapshot header - must be exactly 1.
+        ([regex]::Matches($md, '## 诊断快照')).Count | Should Be 1
+    }
+
+    It "should list LLM-suggested commands that were not approved" {
+        $ctx = [PSCustomObject]@{ snapshot = [PSCustomObject]@{}; app = "X"; error = "E"; tried = "" }
+        $resp = [PSCustomObject]@{
+            commands = @(
+                [PSCustomObject]@{ id = 1; risk = "low"; description = "check service"; command = "Get-Service x"; expected_effect = "shows status" },
+                [PSCustomObject]@{ id = 2; risk = "medium"; description = "restart"; command = "Restart-Service x"; expected_effect = "back to running" },
+                [PSCustomObject]@{ id = 3; risk = "high"; description = "delete file"; command = "Remove-Item x"; expected_effect = "gone" }
+            )
+        }
+        # User only approved #1; #2 and #3 should appear in the pending section.
+        $approved = @(
+            [PSCustomObject]@{
+                id = 1; risk = "low"; description = "check service"; command = "Get-Service x"
+                expected_effect = "shows status"; rollback_hint = "n/a"
+                Result = [PSCustomObject]@{ exitCode = 0; durationSec = 0.5 }
+            }
+        )
+        $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved
+        $md | Should Match '### 建议但未执行'
+        $md | Should Match 'Restart-Service x'
+        $md | Should Match 'Remove-Item x'
+        # Approved command should NOT appear in the pending section.
+        $pendingSection = ($md -split '### 建议但未执行', 2)[1]
+        $pendingSection | Should Not Match 'Get-Service x'
+    }
+
+    It "should not emit the pending section when everything was approved" {
+        $ctx = [PSCustomObject]@{ snapshot = [PSCustomObject]@{}; app = "X"; error = "E"; tried = "" }
+        $resp = [PSCustomObject]@{
+            commands = @(
+                [PSCustomObject]@{ id = 1; risk = "low"; description = "d"; command = "Get-Service"; expected_effect = "ok" }
+            )
+        }
+        $approved = @(
+            [PSCustomObject]@{
+                id = 1; risk = "low"; description = "d"; command = "Get-Service"
+                expected_effect = "ok"; rollback_hint = "n/a"
+                Result = [PSCustomObject]@{ exitCode = 0; durationSec = 1 }
+            }
+        )
+        $md = Format-CMDiagnoseReport -Context $ctx -Response $resp -Approved $approved
+        $md | Should Not Match '建议但未执行'
+    }
 }
