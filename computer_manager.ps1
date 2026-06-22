@@ -696,6 +696,38 @@ function ConvertFrom-CMLLMResponse {
         [switch]$FallbackText
     )
 
+    # Heuristic extractors used only in the FallbackText path: when the model
+    # returns rich markdown prose instead of calling submit_diagnosis, salvage
+    # root_cause and risk_level so the report still shows structured fields
+    # rather than placeholders.
+    function script:Get-CMRootCauseFromText($text) {
+        if (-not $text) { return $null }
+        # Chinese bold marker: **根因定位：** or **根因：** followed by content.
+        # Use \s* to accept either newline-separated (block) or inline (one-liner) prose.
+        $m = [Regex]::Match($text, '\*\*根因(?:定位)?[：:]\*\*\s*([^\r\n]+)')
+        if ($m.Success -and $m.Groups[1].Value.Trim()) {
+            return $m.Groups[1].Value.Trim()
+        }
+        # English: "Root cause:" at line start
+        $m = [Regex]::Match($text, '(?im)^\s*root\s+cause\s*[:：]\s*(.+?)\s*$')
+        if ($m.Success -and $m.Groups[1].Value.Trim()) {
+            return $m.Groups[1].Value.Trim()
+        }
+        return $null
+    }
+    function script:Get-CMRiskLevelFromText($text) {
+        if (-not $text) { return $null }
+        # Multi-char Chinese markers first to avoid single-char 误匹配
+        if ($text -match '高风险') { return 'high' }
+        if ($text -match '中风险') { return 'medium' }
+        if ($text -match '低风险') { return 'low' }
+        # English word-boundary (case-insensitive)
+        if ($text -match '(?i)\b(critical|high|severe)\b') { return 'high' }
+        if ($text -match '(?i)\b(medium|moderate)\b') { return 'medium' }
+        if ($text -match '(?i)\b(low|minor)\b') { return 'low' }
+        return $null
+    }
+
     $choices = Get-CMSafeProp $Raw 'choices'
     $firstChoice = if ($choices -is [System.Collections.IList] -and $choices.Count -gt 0) { $choices[0] } elseif ($choices) { $choices } else { $null }
     $msg = if ($firstChoice) { Get-CMSafeProp $firstChoice 'message' } else { $null }
@@ -752,10 +784,14 @@ function ConvertFrom-CMLLMResponse {
                 # stripping leaves nothing useful.
                 $displayText = [Regex]::Replace([string]$txt, '(?s)<think>.*?</think>', '').Trim()
                 if ([string]::IsNullOrWhiteSpace($displayText)) { $displayText = $txt }
+                # Salvage root_cause and risk_level from the prose via heuristics,
+                # so the report renders real values instead of "（模型未返回结构化结果）".
+                $hRoot = Get-CMRootCauseFromText $displayText
+                $hRisk = Get-CMRiskLevelFromText $displayText
                 $parsed = [PSCustomObject]@{
                     analysis = $displayText
-                    root_cause = "（模型未返回结构化结果）"
-                    risk_level = "unknown"
+                    root_cause = if ($hRoot) { $hRoot } else { "（模型未返回结构化结果）" }
+                    risk_level = if ($hRisk) { $hRisk } else { "unknown" }
                     commands = @()
                 }
             }
